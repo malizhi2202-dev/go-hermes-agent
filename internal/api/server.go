@@ -1,0 +1,618 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"log"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"go-hermes-agent/internal/app"
+	"go-hermes-agent/internal/gateway"
+	"go-hermes-agent/internal/multiagent"
+	"go-hermes-agent/internal/store"
+)
+
+type Server struct {
+	app *app.App
+}
+
+func New(app *app.App) *Server {
+	return &Server{app: app}
+}
+
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	webhook := gateway.NewWebhookAdapter(s.app)
+	telegram := gateway.NewTelegramAdapter(s.app)
+	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/auth/login", s.handleLogin)
+	mux.Handle("/v1/chat", s.authMiddleware(http.HandlerFunc(s.handleChat)))
+	mux.Handle("/v1/context", s.authMiddleware(http.HandlerFunc(s.handleContext)))
+	mux.Handle("/v1/multiagent/plan", s.authMiddleware(http.HandlerFunc(s.handleMultiAgentPlan)))
+	mux.Handle("/v1/multiagent/run", s.authMiddleware(http.HandlerFunc(s.handleMultiAgentRun)))
+	mux.Handle("/v1/memory", s.authMiddleware(http.HandlerFunc(s.handleMemory)))
+	mux.Handle("/v1/models", s.authMiddleware(http.HandlerFunc(s.handleModels)))
+	mux.Handle("/v1/models/discover", s.authMiddleware(http.HandlerFunc(s.handleDiscoverModels)))
+	mux.Handle("/v1/models/switch", s.authMiddleware(http.HandlerFunc(s.handleModelSwitch)))
+	mux.Handle("/v1/sessions", s.authMiddleware(http.HandlerFunc(s.handleSessions)))
+	mux.Handle("/v1/history", s.authMiddleware(http.HandlerFunc(s.handleHistory)))
+	mux.Handle("/v1/search", s.authMiddleware(http.HandlerFunc(s.handleSearch)))
+	mux.Handle("/v1/audit", s.authMiddleware(http.HandlerFunc(s.handleAudit)))
+	mux.Handle("/v1/audit/execution", s.authMiddleware(http.HandlerFunc(s.handleExecutionAudit)))
+	mux.Handle("/v1/extensions", s.authMiddleware(http.HandlerFunc(s.handleExtensions)))
+	mux.Handle("/v1/extensions/refresh", s.authMiddleware(http.HandlerFunc(s.handleRefreshExtensions)))
+	mux.Handle("/v1/extensions/state", s.authMiddleware(http.HandlerFunc(s.handleExtensionState)))
+	mux.Handle("/v1/tools", s.authMiddleware(http.HandlerFunc(s.handleTools)))
+	mux.Handle("/v1/tools/execute", s.authMiddleware(http.HandlerFunc(s.handleExecuteTool)))
+	mux.HandleFunc("/gateway/webhook", webhook.HandleWebhook)
+	mux.HandleFunc("/gateway/telegram/webhook", telegram.HandleWebhook)
+	return mux
+}
+
+func (s *Server) ListenAndServe(ctx context.Context) error {
+	server := &http.Server{
+		Addr:         s.app.Config.ListenAddr,
+		Handler:      s.Handler(),
+		ReadTimeout:  time.Duration(s.app.Config.Server.ReadTimeoutSeconds) * time.Second,
+		WriteTimeout: time.Duration(s.app.Config.Server.WriteTimeoutSeconds) * time.Second,
+		IdleTimeout:  time.Duration(s.app.Config.Server.IdleTimeoutSeconds) * time.Second,
+	}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+	log.Printf("hermes-go listening on %s", s.app.Config.ListenAddr)
+	return server.ListenAndServe()
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": s.app.Config.AppName})
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	token, err := s.app.Auth.Login(r.Context(), req.Username, req.Password)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"token": token})
+}
+
+func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	claims := usernameFromContext(r.Context())
+	var req struct {
+		Prompt string `json:"prompt"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		http.Error(w, "prompt is required", http.StatusBadRequest)
+		return
+	}
+	budget, err := s.app.EstimateContextBudget(r.Context(), claims, req.Prompt)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	response, err := s.app.Chat(r.Context(), claims, req.Prompt)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"response": response, "context": budget})
+}
+
+func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
+	username := usernameFromContext(r.Context())
+	prompt := strings.TrimSpace(r.URL.Query().Get("prompt"))
+	if prompt == "" {
+		http.Error(w, "prompt is required", http.StatusBadRequest)
+		return
+	}
+	budget, err := s.app.EstimateContextBudget(r.Context(), username, prompt)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, budget)
+}
+
+func (s *Server) handleMultiAgentPlan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	username := usernameFromContext(r.Context())
+	var req struct {
+		Objective string            `json:"objective"`
+		Tasks     []multiagent.Task `json:"tasks"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	plan, err := s.app.BuildMultiAgentPlan(r.Context(), username, req.Objective, req.Tasks)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
+}
+
+func (s *Server) handleMultiAgentRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	username := usernameFromContext(r.Context())
+	var plan multiagent.Plan
+	if err := json.NewDecoder(r.Body).Decode(&plan); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	results, aggregate, err := s.app.RunMultiAgentPlan(r.Context(), username, plan)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"plan":      plan,
+		"results":   results,
+		"aggregate": aggregate,
+	})
+}
+
+func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
+	username := usernameFromContext(r.Context())
+	switch r.Method {
+	case http.MethodGet:
+		snapshot, err := s.app.Memory.Read(r.Context(), username)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, snapshot)
+	case http.MethodPost:
+		var req struct {
+			Target  string `json:"target"`
+			Action  string `json:"action"`
+			Content string `json:"content"`
+			Match   string `json:"match"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		snapshot, err := s.app.Memory.Write(r.Context(), username, req.Target, req.Action, req.Content, req.Match)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_ = s.app.Store.WriteAudit(r.Context(), username, "memory_write", "api")
+		writeJSON(w, http.StatusOK, snapshot)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	current := s.app.CurrentLLM()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"current_profile": s.app.CurrentModelProfile(),
+		"current":         current,
+		"profiles":        s.app.ListModelProfiles(),
+	})
+}
+
+func (s *Server) handleDiscoverModels(w http.ResponseWriter, r *http.Request) {
+	discovered, err := s.app.DiscoverLocalModels(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": discovered})
+}
+
+func (s *Server) handleModelSwitch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	username := usernameFromContext(r.Context())
+	var req struct {
+		Profile     string `json:"profile"`
+		Model       string `json:"model"`
+		BaseURL     string `json:"base_url"`
+		Provider    string `json:"provider"`
+		APIKeyEnv   string `json:"api_key_env"`
+		DisplayName string `json:"display_name"`
+		Local       bool   `json:"local"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Model) != "" {
+		profileName := strings.TrimSpace(req.Profile)
+		if profileName == "" {
+			profileName = "custom-" + strings.ReplaceAll(strings.ToLower(strings.TrimSpace(req.Model)), ":", "-")
+		}
+		llmCfg := s.app.CurrentLLM()
+		llmCfg.Model = strings.TrimSpace(req.Model)
+		if strings.TrimSpace(req.BaseURL) != "" {
+			llmCfg.BaseURL = strings.TrimSpace(req.BaseURL)
+		}
+		if strings.TrimSpace(req.Provider) != "" {
+			llmCfg.Provider = strings.TrimSpace(req.Provider)
+		}
+		llmCfg.APIKeyEnv = strings.TrimSpace(req.APIKeyEnv)
+		if strings.TrimSpace(req.DisplayName) != "" {
+			llmCfg.DisplayName = strings.TrimSpace(req.DisplayName)
+		}
+		llmCfg.Local = req.Local
+		if err := s.app.SwitchModelConfig(r.Context(), username, profileName, llmCfg); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":              true,
+			"current_profile": s.app.CurrentModelProfile(),
+			"current":         s.app.CurrentLLM(),
+		})
+		return
+	}
+	profileName := strings.TrimSpace(req.Profile)
+	if profileName == "" {
+		http.Error(w, "profile or model is required", http.StatusBadRequest)
+		return
+	}
+	if resolved, ok := s.app.ResolveModelProfile(profileName); ok {
+		profileName = resolved
+	}
+	if err := s.app.SwitchModelProfile(r.Context(), username, profileName); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":              true,
+		"current_profile": s.app.CurrentModelProfile(),
+		"current":         s.app.CurrentLLM(),
+	})
+}
+
+func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
+	claims := usernameFromContext(r.Context())
+	sessions, err := s.app.Store.ListSessions(r.Context(), claims, 20)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, sessions)
+}
+
+func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	claims := usernameFromContext(r.Context())
+	sessionLimit := 20
+	sessionOffset := 0
+	messageLimit := 20
+	messageOffset := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			http.Error(w, "invalid limit", http.StatusBadRequest)
+			return
+		}
+		sessionLimit = value
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 0 {
+			http.Error(w, "invalid offset", http.StatusBadRequest)
+			return
+		}
+		sessionOffset = value
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("messages_limit")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 0 {
+			http.Error(w, "invalid messages_limit", http.StatusBadRequest)
+			return
+		}
+		messageLimit = value
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("messages_offset")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 0 {
+			http.Error(w, "invalid messages_offset", http.StatusBadRequest)
+			return
+		}
+		messageOffset = value
+	}
+	sessions, err := s.app.Store.ListSessionsPage(r.Context(), claims, sessionLimit, sessionOffset)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	type sessionHistory struct {
+		Session  any `json:"session"`
+		Messages any `json:"messages"`
+	}
+	history := make([]sessionHistory, 0, len(sessions))
+	for _, session := range sessions {
+		messages, err := s.app.Store.GetMessagesPage(r.Context(), session.ID, messageLimit, messageOffset)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		history = append(history, sessionHistory{
+			Session:  session,
+			Messages: messages,
+		})
+	}
+	writeJSON(w, http.StatusOK, history)
+}
+
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	claims := usernameFromContext(r.Context())
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if query == "" {
+		http.Error(w, "q is required", http.StatusBadRequest)
+		return
+	}
+	filters := store.SearchFilters{
+		Username: claims,
+		Query:    query,
+		Role:     strings.TrimSpace(r.URL.Query().Get("role")),
+		Limit:    20,
+	}
+	if sessionIDRaw := strings.TrimSpace(r.URL.Query().Get("session_id")); sessionIDRaw != "" {
+		sessionID, err := strconv.ParseInt(sessionIDRaw, 10, 64)
+		if err != nil {
+			http.Error(w, "invalid session_id", http.StatusBadRequest)
+			return
+		}
+		filters.SessionID = sessionID
+	}
+	if fromRaw := strings.TrimSpace(r.URL.Query().Get("from")); fromRaw != "" {
+		fromTime, err := time.Parse(time.RFC3339, fromRaw)
+		if err != nil {
+			http.Error(w, "invalid from time", http.StatusBadRequest)
+			return
+		}
+		filters.FromTime = fromTime
+	}
+	if toRaw := strings.TrimSpace(r.URL.Query().Get("to")); toRaw != "" {
+		toTime, err := time.Parse(time.RFC3339, toRaw)
+		if err != nil {
+			http.Error(w, "invalid to time", http.StatusBadRequest)
+			return
+		}
+		filters.ToTime = toTime
+	}
+	results, err := s.app.Store.SearchMessages(r.Context(), filters)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+
+func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
+	username := usernameFromContext(r.Context())
+	action := strings.TrimSpace(r.URL.Query().Get("action"))
+	limit := 50
+	offset := 0
+	var fromTime time.Time
+	var toTime time.Time
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			http.Error(w, "invalid limit", http.StatusBadRequest)
+			return
+		}
+		limit = value
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 0 {
+			http.Error(w, "invalid offset", http.StatusBadRequest)
+			return
+		}
+		offset = value
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("from")); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			http.Error(w, "invalid from time", http.StatusBadRequest)
+			return
+		}
+		fromTime = parsed
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("to")); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			http.Error(w, "invalid to time", http.StatusBadRequest)
+			return
+		}
+		toTime = parsed
+	}
+	records, err := s.app.Store.ListAuditFiltered(r.Context(), store.AuditFilters{
+		Username: username,
+		Action:   action,
+		FromTime: fromTime,
+		ToTime:   toTime,
+		Limit:    limit,
+		Offset:   offset,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, records)
+}
+
+func (s *Server) handleExecutionAudit(w http.ResponseWriter, r *http.Request) {
+	username := usernameFromContext(r.Context())
+	limit := 50
+	offset := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			http.Error(w, "invalid limit", http.StatusBadRequest)
+			return
+		}
+		limit = value
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 0 {
+			http.Error(w, "invalid offset", http.StatusBadRequest)
+			return
+		}
+		offset = value
+	}
+	records, err := s.app.Store.ListAuditFiltered(r.Context(), store.AuditFilters{
+		Username: username,
+		Limit:    limit,
+		Offset:   offset,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	filtered := make([]store.AuditRecord, 0, len(records))
+	for _, record := range records {
+		if strings.HasPrefix(record.Action, "system_exec_") {
+			filtered = append(filtered, record)
+		}
+	}
+	writeJSON(w, http.StatusOK, filtered)
+}
+
+func (s *Server) handleTools(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.app.Tools.List())
+}
+
+func (s *Server) handleExtensions(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.app.Extensions.Summary())
+}
+
+func (s *Server) handleRefreshExtensions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := s.app.Extensions.Discover(r.Context()); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	if err := s.app.Extensions.Register(s.app.Tools); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.app.Extensions.Summary())
+}
+
+func (s *Server) handleExtensionState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	username := usernameFromContext(r.Context())
+	var req struct {
+		Kind    string `json:"kind"`
+		Name    string `json:"name"`
+		Enabled bool   `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if err := s.app.Extensions.SetEnabled(r.Context(), username, req.Kind, req.Name, req.Enabled); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.app.Extensions.Register(s.app.Tools); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.app.Extensions.Summary())
+}
+
+func (s *Server) handleExecuteTool(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	username := usernameFromContext(r.Context())
+	var req struct {
+		Name  string         `json:"name"`
+		Input map[string]any `json:"input"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if req.Input == nil {
+		req.Input = make(map[string]any)
+	}
+	req.Input["username"] = username
+	result, err := s.app.Tools.Execute(r.Context(), req.Name, req.Input)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+type ctxKey string
+
+const usernameKey ctxKey = "username"
+
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			http.Error(w, "missing bearer token", http.StatusUnauthorized)
+			return
+		}
+		token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+		claims, err := s.app.Auth.ParseToken(token)
+		if err != nil {
+			http.Error(w, "invalid token", http.StatusUnauthorized)
+			return
+		}
+		ctx := context.WithValue(r.Context(), usernameKey, claims.Username)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func usernameFromContext(ctx context.Context) string {
+	username, _ := ctx.Value(usernameKey).(string)
+	return username
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}

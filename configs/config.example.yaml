@@ -1,0 +1,126 @@
+app_name: hermes-go
+listen_addr: "127.0.0.1:8080"
+data_dir: "./data"
+jwt_issuer: "hermes-go"
+jwt_expiry_minutes: 720
+
+llm:
+  provider: "openai-compatible"
+  model: "gpt-4.1-mini"
+  base_url: "https://api.openai.com/v1"
+  api_key_env: "OPENAI_API_KEY"
+  timeout_seconds: 60
+  display_name: "OpenAI GPT-4.1 Mini"
+  local: false
+
+current_model_profile: "openai-gpt41-mini"
+
+model_profiles:
+  openai-gpt41-mini:
+    provider: "openai-compatible"
+    model: "gpt-4.1-mini"
+    base_url: "https://api.openai.com/v1"
+    api_key_env: "OPENAI_API_KEY"
+    timeout_seconds: 60
+    display_name: "OpenAI GPT-4.1 Mini"
+    local: false
+  openrouter-claude-sonnet:
+    provider: "openai-compatible"
+    model: "anthropic/claude-sonnet-4.6"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    timeout_seconds: 60
+    display_name: "OpenRouter Claude Sonnet 4.6"
+    local: false
+  ollama-qwen3:
+    provider: "openai-compatible"
+    model: "qwen3:14b"
+    base_url: "http://127.0.0.1:11434/v1"
+    api_key_env: ""
+    timeout_seconds: 60
+    display_name: "Ollama Qwen3 14B"
+    local: true
+  lmstudio-local:
+    provider: "openai-compatible"
+    model: "local-model"
+    base_url: "http://127.0.0.1:1234/v1"
+    api_key_env: ""
+    timeout_seconds: 60
+    display_name: "LM Studio Local Model"
+    local: true
+
+memory:
+  enabled: true
+  memory_char_limit: 2200
+  user_char_limit: 1375
+  recall_limit: 3
+
+context:
+  history_window_messages: 8
+  max_prompt_chars: 24000
+  compression_enabled: true
+  compress_threshold_messages: 6
+  protect_last_messages: 4
+  summary_max_chars: 900
+  summary_strategy: "rule"
+
+security:
+  require_auth: true
+  allow_registration: false
+  min_password_length: 12
+  max_login_attempts: 5
+  login_window_minutes: 15
+
+server:
+  read_timeout_seconds: 15
+  write_timeout_seconds: 60
+  idle_timeout_seconds: 60
+
+gateway:
+  enabled: true
+  token: "change-this-gateway-token"
+  allowed_platforms:
+    - "webhook"
+  telegram:
+    enabled: false
+    bot_token_env: "TELEGRAM_BOT_TOKEN"
+    secret: "change-this-telegram-secret"
+
+execution:
+  enabled: false
+  timeout_seconds: 10
+  allowed_commands:
+    - "echo"
+    - "date"
+  max_args: 8
+  max_arg_length: 256
+  max_output_bytes: 4096
+  command_rules:
+    echo:
+      max_args: 8
+      max_arg_length: 256
+      max_output_bytes: 4096
+    date:
+      max_args: 4
+      max_arg_length: 64
+      max_output_bytes: 512
+      allowed_arg_prefixes:
+        - "+"
+        - "--iso"
+
+extensions:
+  plugins_dir: "./plugins"
+  skills_dirs:
+    - "./skills"
+
+mcp_servers:
+  filesystem:
+    enabled: false
+    command: "npx"
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-filesystem"
+      - "./"
+    timeout_seconds: 15
+    include_tools: []
+    exclude_tools: []
