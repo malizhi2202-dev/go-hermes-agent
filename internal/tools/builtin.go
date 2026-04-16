@@ -16,6 +16,7 @@ type BuiltinDeps struct {
 	ReadMemory     func(ctx context.Context, username string) (any, error)
 	WriteMemory    func(ctx context.Context, username, target, action, content, match string) (any, error)
 	ExecuteCommand func(ctx context.Context, command string, args []string) (string, error)
+	ExecuteProfile func(ctx context.Context, profile string, vars map[string]string, approved bool, capabilityToken string) (any, error)
 	WriteAudit     func(ctx context.Context, username, action, detail string) error
 }
 
@@ -153,6 +154,55 @@ func RegisterBuiltins(registry *Registry, deps BuiltinDeps) error {
 			}
 			_ = deps.WriteAudit(ctx, username, "system_exec_success", fmt.Sprintf("command=%s output_bytes=%d", command, len(output)))
 			return map[string]any{"output": output}, nil
+		},
+	}); err != nil {
+		return err
+	}
+	if err := registry.Register(Tool{
+		Name:        "system.exec_profile",
+		Description: "Execute a named allowlisted multi-step execution profile when execution is enabled, optionally requiring approval or a capability token.",
+		InputKeys:   []string{"profile", "vars", "approved", "capability_token"},
+		Handler: func(ctx context.Context, input map[string]any) (map[string]any, error) {
+			profile, _ := input["profile"].(string)
+			if strings.TrimSpace(profile) == "" {
+				return nil, fmt.Errorf("profile is required")
+			}
+			vars := map[string]string{}
+			if rawVars, ok := input["vars"].(map[string]any); ok {
+				for key, value := range rawVars {
+					if str, ok := value.(string); ok {
+						vars[key] = str
+					}
+				}
+			}
+			approved := false
+			switch raw := input["approved"].(type) {
+			case bool:
+				approved = raw
+			case string:
+				approved = strings.EqualFold(strings.TrimSpace(raw), "true")
+			}
+			capabilityToken, _ := input["capability_token"].(string)
+			username, _ := input["username"].(string)
+			_ = deps.WriteAudit(ctx, username, "system_exec_profile_attempt", fmt.Sprintf("profile=%s vars=%d approved=%t capability_token=%t", profile, len(vars), approved, strings.TrimSpace(capabilityToken) != ""))
+			results, err := deps.ExecuteProfile(ctx, profile, vars, approved, capabilityToken)
+			if err != nil {
+				_ = deps.WriteAudit(ctx, username, "system_exec_profile_denied", fmt.Sprintf("profile=%s error=%s", profile, err.Error()))
+				return nil, err
+			}
+			resultMap, _ := results.(map[string]any)
+			stepCount := 0
+			rollbackCount := 0
+			if resultMap != nil {
+				if steps, ok := resultMap["steps"].([]any); ok {
+					stepCount = len(steps)
+				}
+				if rollback, ok := resultMap["rollback"].([]any); ok {
+					rollbackCount = len(rollback)
+				}
+			}
+			_ = deps.WriteAudit(ctx, username, "system_exec_profile_success", fmt.Sprintf("profile=%s steps=%d rollback_steps=%d", profile, stepCount, rollbackCount))
+			return map[string]any{"results": results}, nil
 		},
 	}); err != nil {
 		return err

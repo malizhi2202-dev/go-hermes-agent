@@ -57,7 +57,7 @@
 - child runtime 第一版：优先走 LLM，总失败时回退 stub
 - child runtime 第一版已支持受控多轮循环、安全工具白名单执行、原生 tool-calling 优先和 seed history 恢复
 - 还缺：
-- 更完整的 child loop state 恢复，不只恢复最后成功 tool state
+- 更完整的 child loop state 恢复仍可继续增强；当前已能恢复最近 assistant/tool 历史和成功 tool state，但还没有完整状态快照
 - 更完整的 tool 级权限注入与更多真实 delegated tools
 - 更细粒度的父子 agent 结构化结果回注主会话
 - 递归深度控制与更细粒度审计
@@ -83,7 +83,7 @@
 
 ### Gateway 平台族
 
-- Slack 正式适配
+- Slack 已有 slash command + events 第一版
 - Discord / WhatsApp / Signal / Home Assistant 等平台
 - 平台特有审批 / 交互控件
 

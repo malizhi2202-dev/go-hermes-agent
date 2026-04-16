@@ -40,6 +40,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/v1/multiagent/run", s.authMiddleware(http.HandlerFunc(s.handleMultiAgentRun)))
 	mux.Handle("/v1/multiagent/traces", s.authMiddleware(http.HandlerFunc(s.handleMultiAgentTraces)))
 	mux.Handle("/v1/multiagent/traces/summary", s.authMiddleware(http.HandlerFunc(s.handleMultiAgentTraceSummary)))
+	mux.Handle("/v1/multiagent/traces/verifiers", s.authMiddleware(http.HandlerFunc(s.handleMultiAgentVerifierSummary)))
 	mux.Handle("/v1/multiagent/traces/failures", s.authMiddleware(http.HandlerFunc(s.handleMultiAgentTraceFailures)))
 	mux.Handle("/v1/multiagent/traces/hotspots", s.authMiddleware(http.HandlerFunc(s.handleMultiAgentTraceHotspots)))
 	mux.Handle("/v1/multiagent/replay", s.authMiddleware(http.HandlerFunc(s.handleMultiAgentReplay)))
@@ -53,14 +54,18 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/v1/search", s.authMiddleware(http.HandlerFunc(s.handleSearch)))
 	mux.Handle("/v1/audit", s.authMiddleware(http.HandlerFunc(s.handleAudit)))
 	mux.Handle("/v1/audit/execution", s.authMiddleware(http.HandlerFunc(s.handleExecutionAudit)))
+	mux.Handle("/v1/audit/execution/profiles", s.authMiddleware(http.HandlerFunc(s.handleExecutionProfileAudit)))
 	mux.Handle("/v1/extensions", s.authMiddleware(http.HandlerFunc(s.handleExtensions)))
+	mux.Handle("/v1/extensions/hooks", s.authMiddleware(http.HandlerFunc(s.handleExtensionHooks)))
 	mux.Handle("/v1/extensions/refresh", s.authMiddleware(http.HandlerFunc(s.handleRefreshExtensions)))
 	mux.Handle("/v1/extensions/state", s.authMiddleware(http.HandlerFunc(s.handleExtensionState)))
+	mux.Handle("/v1/extensions/validate", s.authMiddleware(http.HandlerFunc(s.handleExtensionValidate)))
 	mux.Handle("/v1/tools", s.authMiddleware(http.HandlerFunc(s.handleTools)))
 	mux.Handle("/v1/tools/execute", s.authMiddleware(http.HandlerFunc(s.handleExecuteTool)))
 	mux.HandleFunc("/gateway/webhook", webhook.HandleWebhook)
 	mux.HandleFunc("/gateway/telegram/webhook", telegram.HandleWebhook)
 	mux.HandleFunc("/gateway/slack/command", slack.HandleCommand)
+	mux.HandleFunc("/gateway/slack/events", slack.HandleEvents)
 	return mux
 }
 
@@ -232,6 +237,21 @@ func (s *Server) handleMultiAgentTraceFailures(w http.ResponseWriter, r *http.Re
 	}
 	filters.Username = usernameFromContext(r.Context())
 	records, err := s.app.Store.ListMultiAgentTraceFailures(r.Context(), filters)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, records)
+}
+
+func (s *Server) handleMultiAgentVerifierSummary(w http.ResponseWriter, r *http.Request) {
+	filters, err := multiAgentTraceFiltersFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	filters.Username = usernameFromContext(r.Context())
+	records, err := s.app.Store.SummarizeMultiAgentVerifierResults(r.Context(), filters)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -672,12 +692,108 @@ func (s *Server) handleExecutionAudit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, filtered)
 }
 
+func (s *Server) handleExecutionProfileAudit(w http.ResponseWriter, r *http.Request) {
+	username := usernameFromContext(r.Context())
+	var fromTime time.Time
+	var toTime time.Time
+	if raw := strings.TrimSpace(r.URL.Query().Get("from")); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			http.Error(w, "invalid from time", http.StatusBadRequest)
+			return
+		}
+		fromTime = parsed
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("to")); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			http.Error(w, "invalid to time", http.StatusBadRequest)
+			return
+		}
+		toTime = parsed
+	}
+	records, err := s.app.Store.ListAuditFiltered(r.Context(), store.AuditFilters{
+		Username: username,
+		Action:   "system_exec_profile_%",
+		FromTime: fromTime,
+		ToTime:   toTime,
+		Limit:    200,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	summary, err := s.app.Store.SummarizeAuditActions(r.Context(), store.AuditFilters{
+		Username: username,
+		Action:   "system_exec_profile_%",
+		FromTime: fromTime,
+		ToTime:   toTime,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	type executionProfileSummary struct {
+		Profile string `json:"profile"`
+		Total   int    `json:"total"`
+		Success int    `json:"success"`
+		Denied  int    `json:"denied"`
+	}
+	profileTotals := map[string]*executionProfileSummary{}
+	for _, record := range records {
+		profile := extractAuditDetailValue(record.Detail, "profile")
+		if profile == "" {
+			profile = "unknown"
+		}
+		entry, ok := profileTotals[profile]
+		if !ok {
+			entry = &executionProfileSummary{Profile: profile}
+			profileTotals[profile] = entry
+		}
+		entry.Total++
+		switch {
+		case strings.HasSuffix(record.Action, "_success"):
+			entry.Success++
+		case strings.HasSuffix(record.Action, "_denied"):
+			entry.Denied++
+		}
+	}
+	profileSummary := make([]executionProfileSummary, 0, len(profileTotals))
+	for _, entry := range profileTotals {
+		profileSummary = append(profileSummary, *entry)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"records":         records,
+		"action_summary":  summary,
+		"profile_summary": profileSummary,
+		"category":        "system_exec_profile",
+	})
+}
+
 func (s *Server) handleTools(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.app.Tools.List())
 }
 
 func (s *Server) handleExtensions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.app.Extensions.Summary())
+}
+
+func (s *Server) handleExtensionHooks(w http.ResponseWriter, r *http.Request) {
+	username := usernameFromContext(r.Context())
+	limit, offset := parseLimitOffset(r, 50)
+	records, err := s.app.Store.ListExtensionHookRuns(r.Context(), store.ExtensionHookFilters{
+		Username: username,
+		Kind:     strings.TrimSpace(r.URL.Query().Get("kind")),
+		Name:     strings.TrimSpace(r.URL.Query().Get("name")),
+		Phase:    strings.TrimSpace(r.URL.Query().Get("phase")),
+		Limit:    limit,
+		Offset:   offset,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, records)
 }
 
 func (s *Server) handleRefreshExtensions(w http.ResponseWriter, r *http.Request) {
@@ -720,6 +836,28 @@ func (s *Server) handleExtensionState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.app.Extensions.Summary())
+}
+
+func (s *Server) handleExtensionValidate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	username := usernameFromContext(r.Context())
+	var req struct {
+		Kind string `json:"kind"`
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	result, err := s.app.Extensions.Validate(r.Context(), username, req.Kind, req.Name)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleExecuteTool(w http.ResponseWriter, r *http.Request) {
@@ -775,8 +913,34 @@ func usernameFromContext(ctx context.Context) string {
 	return username
 }
 
+func parseLimitOffset(r *http.Request, defaultLimit int) (int, int) {
+	limit := defaultLimit
+	offset := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil && value > 0 {
+			limit = value
+		}
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil && value >= 0 {
+			offset = value
+		}
+	}
+	return limit, offset
+}
+
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func extractAuditDetailValue(detail, key string) string {
+	prefix := key + "="
+	for _, part := range strings.Fields(strings.TrimSpace(detail)) {
+		if strings.HasPrefix(part, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(part, prefix))
+		}
+	}
+	return ""
 }

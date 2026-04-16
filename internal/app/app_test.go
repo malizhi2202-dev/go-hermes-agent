@@ -11,6 +11,7 @@ import (
 
 	"hermes-agent/go/internal/config"
 	"hermes-agent/go/internal/multiagent"
+	"hermes-agent/go/internal/store"
 )
 
 func TestRunMultiAgentPlanFallsBackToStubWithoutAPIKey(t *testing.T) {
@@ -170,7 +171,155 @@ func TestRunMultiAgentPlanUsesNativeToolCallingWhenAvailable(t *testing.T) {
 	if !strings.Contains(results[0].Summary, "[runtime=llm-toolcalls]") {
 		t.Fatalf("expected native tool-calling runtime, got %q", results[0].Summary)
 	}
-	if len(results[0].Trace) < 2 || results[0].Trace[0].Tool != "session.history" {
-		t.Fatalf("expected tool trace followed by final trace, got %#v", results[0].Trace)
+	foundHistoryTool := false
+	for _, step := range results[0].Trace {
+		if step.Tool == "session.history" {
+			foundHistoryTool = true
+			break
+		}
+	}
+	if len(results[0].Trace) < 3 || !foundHistoryTool {
+		t.Fatalf("expected snapshot + tool + final trace, got %#v", results[0].Trace)
+	}
+}
+
+func TestResumeBasisRecoversHistoryAndToolStates(t *testing.T) {
+	traceRows := []store.MultiAgentTraceRecord{
+		{Iteration: 1, Type: "snapshot", SnapshotJSON: `{"current_prompt":"continue delegated task","history_len":2,"next_iteration":3,"runtime":"llm-toolcalls","tool_risks":["tool timeout"],"history":[{"role":"assistant","content":"Inspecting prior work."},{"role":"tool","name":"session.search","content":"{\"items\":[1]}"}]}`},
+		{Iteration: 1, Tool: "session.search", OutputJSON: `{"items":[1]}`},
+		{Iteration: 2, Tool: "memory.read", OutputJSON: `{"memory":"alpha"}`},
+		{Iteration: 3, Tool: "session.history", Error: "timeout", InputJSON: `{"limit":"2"}`},
+	}
+	messages := []store.Message{
+		{Role: "user", Content: "ignored"},
+		{Role: "assistant", Content: "Thinking about the delegated task."},
+		{Role: "tool", Content: `session.search result: {"items":[1]}`},
+		{Role: "assistant", Content: "I should read memory next."},
+		{Role: "tool", Content: `memory.read result: {"memory":"alpha"}`},
+	}
+
+	basis := deriveResumeBasis(traceRows, messages)
+	if basis.LastIteration != 3 {
+		t.Fatalf("expected last iteration 3, got %#v", basis)
+	}
+	if basis.RecoveredHistoryMessage != 4 {
+		t.Fatalf("expected recovered history message count, got %#v", basis)
+	}
+	if basis.LastSnapshotPrompt != "continue delegated task" || basis.LastSnapshotHistoryLen != 2 {
+		t.Fatalf("expected recovered snapshot prompt/history len, got %#v", basis)
+	}
+	if basis.LastSnapshotNextIteration != 3 || basis.LastSnapshotRuntime != "llm-toolcalls" {
+		t.Fatalf("expected recovered next iteration/runtime, got %#v", basis)
+	}
+	if len(basis.LastSnapshotToolRisks) != 1 || basis.LastSnapshotToolRisks[0] != "tool timeout" {
+		t.Fatalf("expected recovered tool risks, got %#v", basis.LastSnapshotToolRisks)
+	}
+	if len(basis.LastSnapshotHistory) != 2 || basis.LastSnapshotHistory[1].Name != "session.search" {
+		t.Fatalf("expected exact snapshot history, got %#v", basis.LastSnapshotHistory)
+	}
+	if len(basis.RecoveredToolStates) != 2 || basis.RecoveredToolStates[0].Tool != "session.search" || basis.RecoveredToolStates[1].Tool != "memory.read" {
+		t.Fatalf("unexpected recovered tool states: %#v", basis.RecoveredToolStates)
+	}
+
+	seed := buildResumeSeedHistory(messages, basis)
+	if len(seed) != 4 {
+		t.Fatalf("expected recovered seed history, got %#v", seed)
+	}
+	if seed[0].Role != "assistant" || seed[1].Role != "tool" || seed[1].Name != "session.search" || !strings.Contains(seed[1].Content, `"items":[1]`) {
+		t.Fatalf("unexpected parsed tool history: %#v", seed)
+	}
+
+	loopSeed := buildResumeLoopSeed(basis)
+	if loopSeed.CurrentPrompt != "continue delegated task" || loopSeed.NextIteration != 3 || loopSeed.Runtime != "llm-toolcalls" {
+		t.Fatalf("unexpected loop seed: %#v", loopSeed)
+	}
+	if len(loopSeed.ToolRisks) != 1 || loopSeed.ToolRisks[0] != "tool timeout" {
+		t.Fatalf("unexpected loop seed risks: %#v", loopSeed.ToolRisks)
+	}
+}
+
+func TestRunMultiAgentPlanCanUseExecProfileTool(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		callCount++
+		switch callCount {
+		case 1:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{
+					{
+						"finish_reason": "tool_calls",
+						"message": map[string]any{
+							"role":    "assistant",
+							"content": "",
+							"tool_calls": []map[string]any{
+								{
+									"id":   "call_exec_profile_1",
+									"type": "function",
+									"function": map[string]any{
+										"name":      "system.exec_profile",
+										"arguments": `{"profile":"system-health","approved":true}`,
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{
+					{
+						"finish_reason": "stop",
+						"message": map[string]any{
+							"role":    "assistant",
+							"content": "Execution profile completed.",
+						},
+					},
+				},
+			})
+		}
+	}))
+	defer server.Close()
+
+	cfg := config.Default()
+	cfg.DataDir = filepath.Join(t.TempDir(), "data")
+	cfg.CurrentModelProfile = ""
+	cfg.LLM.BaseURL = server.URL
+	cfg.LLM.Model = "test-model"
+	cfg.LLM.APIKeyEnv = ""
+	cfg.Execution.Enabled = true
+	cfg.Execution.AllowedCommands = []string{"echo", "date"}
+	application, err := New(cfg)
+	if err != nil {
+		t.Fatalf("init app: %v", err)
+	}
+	defer application.Close()
+
+	plan, err := application.BuildMultiAgentPlan(context.Background(), "admin", "inspect", []multiagent.Task{
+		{ID: "exec", Goal: "run safe system health execution profile", AllowedTools: []string{"system.exec_profile"}},
+	})
+	if err != nil {
+		t.Fatalf("build plan: %v", err)
+	}
+	results, aggregate, err := application.RunMultiAgentPlan(context.Background(), "admin", plan)
+	if err != nil {
+		t.Fatalf("run plan: %v", err)
+	}
+	if aggregate.Completed != 1 || len(results) != 1 {
+		t.Fatalf("unexpected aggregate/results: %#v %#v", aggregate, results)
+	}
+	foundSnapshot := false
+	foundVerifiedTool := false
+	for _, step := range results[0].Trace {
+		if step.Type == "snapshot" && step.Snapshot != nil {
+			foundSnapshot = true
+		}
+		if step.Tool == "system.exec_profile" && step.Verifier != "" && step.VerificationClass == "ok" {
+			foundVerifiedTool = true
+		}
+	}
+	if !foundSnapshot || !foundVerifiedTool {
+		t.Fatalf("expected snapshot and verified tool trace, got %#v", results[0].Trace)
 	}
 }

@@ -15,6 +15,7 @@ import (
 
 	"hermes-agent/go/internal/app"
 	"hermes-agent/go/internal/config"
+	"hermes-agent/go/internal/store"
 )
 
 func TestToolsEndpointRequiresAuthAndReturnsTools(t *testing.T) {
@@ -215,6 +216,74 @@ func TestExecutionAuditEndpointFiltersExecEvents(t *testing.T) {
 	}
 	if len(records) != 1 {
 		t.Fatalf("expected 1 execution audit record, got %d", len(records))
+	}
+}
+
+func TestExtensionValidateEndpointRunsLifecycleValidation(t *testing.T) {
+	cfg := config.Default()
+	root := t.TempDir()
+	cfg.DataDir = filepath.Join(root, "data")
+	cfg.Extensions.PluginsDir = filepath.Join(root, "plugins")
+	if err := os.MkdirAll(filepath.Join(cfg.Extensions.PluginsDir, "echoer"), 0o755); err != nil {
+		t.Fatalf("mkdir plugin: %v", err)
+	}
+	validateScript := filepath.Join(root, "validate.sh")
+	validateOut := filepath.Join(root, "validate.out")
+	if err := os.WriteFile(validateScript, []byte("#!/bin/sh\nprintf '%s' \"$1\" > \"$2\"\n"), 0o755); err != nil {
+		t.Fatalf("write validate script: %v", err)
+	}
+	manifest := `
+name: echoer
+lifecycle:
+  validate:
+    - name: validate
+      command: ` + validateScript + `
+      args_template:
+        - "{{extension_name}}"
+        - ` + validateOut + `
+`
+	if err := os.WriteFile(filepath.Join(cfg.Extensions.PluginsDir, "echoer", "plugin.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	application, err := app.New(cfg)
+	if err != nil {
+		t.Fatalf("init app: %v", err)
+	}
+	defer application.Close()
+	if err := application.Auth.InitAdmin(context.Background(), "admin", "ChangeMe123!"); err != nil {
+		t.Fatalf("init admin: %v", err)
+	}
+	token, err := application.Auth.Login(context.Background(), "admin", "ChangeMe123!")
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	server := New(application)
+	body := []byte(`{"kind":"plugin","name":"echoer"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/extensions/validate", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	raw, err := os.ReadFile(validateOut)
+	if err != nil || string(raw) != "echoer" {
+		t.Fatalf("unexpected validate hook output: %q err=%v", string(raw), err)
+	}
+
+	hooksReq := httptest.NewRequest(http.MethodGet, "/v1/extensions/hooks?kind=plugin&name=echoer&phase=validate", nil)
+	hooksReq.Header.Set("Authorization", "Bearer "+token)
+	hooksRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(hooksRec, hooksReq)
+	if hooksRec.Code != http.StatusOK {
+		t.Fatalf("expected hooks status 200, got %d body=%s", hooksRec.Code, hooksRec.Body.String())
+	}
+	var hookRecords []map[string]any
+	if err := json.Unmarshal(hooksRec.Body.Bytes(), &hookRecords); err != nil {
+		t.Fatalf("decode hooks response: %v", err)
+	}
+	if len(hookRecords) == 0 || hookRecords[0]["phase"] != "validate" {
+		t.Fatalf("unexpected hook records: %#v", hookRecords)
 	}
 }
 
@@ -433,6 +502,94 @@ func TestExtensionsEndpointReturnsDiscoveredExtensions(t *testing.T) {
 	skills, ok := payload["skills"].([]any)
 	if !ok || len(skills) != 1 {
 		t.Fatalf("unexpected skills payload: %#v", payload["skills"])
+	}
+}
+
+func TestExecutionProfileAuditEndpointReturnsProfileSummary(t *testing.T) {
+	cfg := config.Default()
+	cfg.DataDir = filepath.Join(t.TempDir(), "data")
+	application, err := app.New(cfg)
+	if err != nil {
+		t.Fatalf("init app: %v", err)
+	}
+	defer application.Close()
+	if err := application.Auth.InitAdmin(context.Background(), "admin", "ChangeMe123!"); err != nil {
+		t.Fatalf("init admin: %v", err)
+	}
+	token, err := application.Auth.Login(context.Background(), "admin", "ChangeMe123!")
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	_ = application.Store.WriteAudit(context.Background(), "admin", "system_exec_profile_attempt", "profile=system-health vars=1 approved=true capability_token=false")
+	_ = application.Store.WriteAudit(context.Background(), "admin", "system_exec_profile_success", "profile=system-health steps=2 rollback_steps=0")
+	_ = application.Store.WriteAudit(context.Background(), "admin", "system_exec_profile_denied", "profile=system-health error=requires approval")
+
+	server := New(application)
+	req := httptest.NewRequest(http.MethodGet, "/v1/audit/execution/profiles", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode execution profile audit response: %v", err)
+	}
+	profiles, ok := payload["profile_summary"].([]any)
+	if !ok || len(profiles) == 0 {
+		t.Fatalf("expected profile_summary payload, got %#v", payload["profile_summary"])
+	}
+	actions, ok := payload["action_summary"].([]any)
+	if !ok || len(actions) == 0 {
+		t.Fatalf("expected action_summary payload, got %#v", payload["action_summary"])
+	}
+}
+
+func TestMultiAgentVerifierSummaryEndpointReturnsClassifiedRows(t *testing.T) {
+	cfg := config.Default()
+	cfg.DataDir = filepath.Join(t.TempDir(), "data")
+	application, err := app.New(cfg)
+	if err != nil {
+		t.Fatalf("init app: %v", err)
+	}
+	defer application.Close()
+	if err := application.Auth.InitAdmin(context.Background(), "admin", "ChangeMe123!"); err != nil {
+		t.Fatalf("init admin: %v", err)
+	}
+	token, err := application.Auth.Login(context.Background(), "admin", "ChangeMe123!")
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if err := application.Store.InsertMultiAgentTrace(context.Background(), store.MultiAgentTraceRecord{
+		Username:          "admin",
+		ParentSessionID:   10,
+		ChildSessionID:    11,
+		TaskID:            "task-1",
+		Iteration:         1,
+		Type:              "tool",
+		Tool:              "session.search",
+		Verifier:          "results field check",
+		VerificationClass: "missing_results_field",
+		Verified:          false,
+	}); err != nil {
+		t.Fatalf("insert trace: %v", err)
+	}
+
+	server := New(application)
+	req := httptest.NewRequest(http.MethodGet, "/v1/multiagent/traces/verifiers?parent_session_id=10", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode verifier payload: %v", err)
+	}
+	if len(payload) != 1 || payload[0]["verification_class"] != "missing_results_field" {
+		t.Fatalf("unexpected verifier summary payload: %#v", payload)
 	}
 }
 

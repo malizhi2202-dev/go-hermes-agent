@@ -33,6 +33,16 @@ func TestEnabledMCPServerRequiresCommand(t *testing.T) {
 	}
 }
 
+func TestExecutionProfileRequiresSteps(t *testing.T) {
+	cfg := Default()
+	cfg.Execution.Profiles = map[string]ExecutionProfile{
+		"broken": {},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for empty execution profile")
+	}
+}
+
 func TestInvalidContextConfigFails(t *testing.T) {
 	cfg := Default()
 	cfg.Context.HistoryWindowMessages = -1

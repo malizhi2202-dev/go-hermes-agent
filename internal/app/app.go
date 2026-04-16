@@ -56,13 +56,36 @@ type ContextBudget struct {
 }
 
 // ResumeBasis describes the exact trace step used to rebuild a resumed child task.
+type ResumeToolState struct {
+	Iteration int    `json:"iteration"`
+	Tool      string `json:"tool"`
+	Output    string `json:"output,omitempty"`
+}
+
+// ResumeBasis describes the exact trace step used to rebuild a resumed child task.
 type ResumeBasis struct {
-	LastIteration      int            `json:"last_iteration"`
-	LastSuccessfulTool string         `json:"last_successful_tool,omitempty"`
-	LastSuccessfulOut  string         `json:"last_successful_output,omitempty"`
-	LastFailedTool     string         `json:"last_failed_tool,omitempty"`
-	LastFailedError    string         `json:"last_failed_error,omitempty"`
-	LastFailedInput    map[string]any `json:"last_failed_input,omitempty"`
+	LastIteration             int               `json:"last_iteration"`
+	LastSuccessfulTool        string            `json:"last_successful_tool,omitempty"`
+	LastSuccessfulOut         string            `json:"last_successful_output,omitempty"`
+	LastFailedTool            string            `json:"last_failed_tool,omitempty"`
+	LastFailedError           string            `json:"last_failed_error,omitempty"`
+	LastFailedInput           map[string]any    `json:"last_failed_input,omitempty"`
+	RecoveredHistoryMessage   int               `json:"recovered_history_messages,omitempty"`
+	RecoveredToolStates       []ResumeToolState `json:"recovered_tool_states,omitempty"`
+	LastSnapshot              map[string]any    `json:"last_snapshot,omitempty"`
+	LastSnapshotPrompt        string            `json:"last_snapshot_prompt,omitempty"`
+	LastSnapshotHistoryLen    int               `json:"last_snapshot_history_len,omitempty"`
+	LastSnapshotHistory       []llm.Message     `json:"last_snapshot_history,omitempty"`
+	LastSnapshotNextIteration int               `json:"last_snapshot_next_iteration,omitempty"`
+	LastSnapshotRuntime       string            `json:"last_snapshot_runtime,omitempty"`
+	LastSnapshotToolRisks     []string          `json:"last_snapshot_tool_risks,omitempty"`
+}
+
+type childLoopSeed struct {
+	CurrentPrompt string
+	NextIteration int
+	Runtime       string
+	ToolRisks     []string
 }
 
 // New wires together the application container and its core dependencies.
@@ -108,6 +131,18 @@ func New(cfg config.Config) (*App, error) {
 				return result, nil
 			},
 			st.UpsertExtensionState,
+			func(ctx context.Context, record extensions.ExtensionHookRecord) error {
+				return st.InsertExtensionHookRun(ctx, store.ExtensionHookRecord{
+					Username: record.Username,
+					Kind:     record.Kind,
+					Name:     record.Name,
+					Phase:    record.Phase,
+					Hook:     record.Hook,
+					Status:   record.Status,
+					Output:   record.Output,
+					Error:    record.Error,
+				})
+			},
 		),
 	}
 	application.Compressor.WithSummarizer(func(ctx context.Context, existingSummary string, history []llm.Message, maxChars int) (string, error) {
@@ -177,6 +212,9 @@ func New(cfg config.Config) (*App, error) {
 		},
 		ExecuteCommand: func(ctx context.Context, command string, args []string) (string, error) {
 			return application.Runner.Execute(ctx, command, args)
+		},
+		ExecuteProfile: func(ctx context.Context, profile string, vars map[string]string, approved bool, capabilityToken string) (any, error) {
+			return application.Runner.ExecuteProfile(ctx, profile, vars, approved, capabilityToken)
 		},
 		WriteAudit: application.Store.WriteAudit,
 	}); err != nil {
@@ -517,6 +555,10 @@ func (a *App) runMultiAgentChildTask(ctx context.Context, username string, paren
 }
 
 func (a *App) runMultiAgentChildTaskWithSeed(ctx context.Context, username string, parentSessionID int64, task multiagent.Task, seedHistory []llm.Message) multiagent.Result {
+	return a.runMultiAgentChildTaskWithSeedAndState(ctx, username, parentSessionID, task, seedHistory, childLoopSeed{})
+}
+
+func (a *App) runMultiAgentChildTaskWithSeedAndState(ctx context.Context, username string, parentSessionID int64, task multiagent.Task, seedHistory []llm.Message, seed childLoopSeed) multiagent.Result {
 	llmCfg := a.CurrentLLM()
 	allowedTools, invalidTools := a.resolveChildAllowedTools(task.AllowedTools)
 	prompt, historySnippet := a.buildMultiAgentTaskPrompt(ctx, parentSessionID, task)
@@ -530,7 +572,7 @@ func (a *App) runMultiAgentChildTaskWithSeed(ctx context.Context, username strin
 			NextActions: []string{"Check SQLite child session creation path."},
 		}
 	}
-	summary, runtime, trace, toolRisks, err := a.tryRunMultiAgentLLMTask(ctx, username, llmCfg, task, prompt, historySnippet, allowedTools, childSessionID, seedHistory)
+	summary, runtime, trace, toolRisks, err := a.tryRunMultiAgentLLMTaskWithState(ctx, username, llmCfg, task, prompt, historySnippet, allowedTools, childSessionID, seedHistory, seed)
 	risks := make([]string, 0, 2)
 	if len(invalidTools) > 0 {
 		risks = append(risks, "Some requested child tools are not available: "+strings.Join(invalidTools, ", "))
@@ -637,7 +679,7 @@ func (a *App) ReplayMultiAgentChild(ctx context.Context, username string, childS
 			recoveryHint = "Resume from the last completed tool step and continue the delegated task with fresh context."
 		}
 	}
-	resumeBasis := deriveResumeBasis(traceRows)
+	resumeBasis := deriveResumeBasis(traceRows, messages)
 	return map[string]any{
 		"session":       session,
 		"trace":         traceRows,
@@ -676,11 +718,18 @@ func (a *App) ResumeMultiAgentChild(ctx context.Context, username string, childS
 	if err != nil {
 		return nil, err
 	}
-	resumeBasis := deriveResumeBasis(traceRows)
+	messages, err := a.Store.GetMessagesPage(ctx, childSessionID, 200, 0)
+	if err != nil {
+		return nil, err
+	}
+	resumeBasis := deriveResumeBasis(traceRows, messages)
 	task.ID = task.ID + "-resume"
 	task.Context = strings.TrimSpace(task.Context + "\n" + buildResumeContext(childSessionID, resumeBasis))
-	seedHistory := buildResumeSeedHistory(resumeBasis)
-	result := a.runMultiAgentChildTaskWithSeed(ctx, username, session.ParentSessionID.Int64, task, seedHistory)
+	if strings.TrimSpace(resumeBasis.LastSnapshotPrompt) != "" {
+		task.Goal = resumeBasis.LastSnapshotPrompt
+	}
+	seedHistory := buildResumeSeedHistory(messages, resumeBasis)
+	result := a.runMultiAgentChildTaskWithSeedAndState(ctx, username, session.ParentSessionID.Int64, task, seedHistory, buildResumeLoopSeed(resumeBasis))
 	return map[string]any{
 		"resumed_from_child_session_id": childSessionID,
 		"parent_session_id":             session.ParentSessionID.Int64,
@@ -690,21 +739,29 @@ func (a *App) ResumeMultiAgentChild(ctx context.Context, username string, childS
 }
 
 func (a *App) tryRunMultiAgentLLMTask(ctx context.Context, username string, llmCfg config.LLMConfig, task multiagent.Task, prompt, historySnippet string, allowedTools []tools.Tool, childSessionID int64, seedHistory []llm.Message) (string, string, []multiagent.TraceStep, []string, error) {
+	return a.tryRunMultiAgentLLMTaskWithState(ctx, username, llmCfg, task, prompt, historySnippet, allowedTools, childSessionID, seedHistory, childLoopSeed{})
+}
+
+func (a *App) tryRunMultiAgentLLMTaskWithState(ctx context.Context, username string, llmCfg config.LLMConfig, task multiagent.Task, prompt, historySnippet string, allowedTools []tools.Tool, childSessionID int64, seedHistory []llm.Message, seed childLoopSeed) (string, string, []multiagent.TraceStep, []string, error) {
 	if strings.TrimSpace(llmCfg.BaseURL) == "" || strings.TrimSpace(llmCfg.Model) == "" {
 		return "", "", nil, nil, fmt.Errorf("llm is not configured")
 	}
 	if strings.TrimSpace(llmCfg.APIKeyEnv) != "" && strings.TrimSpace(os.Getenv(llmCfg.APIKeyEnv)) == "" {
 		return "", "", nil, nil, fmt.Errorf("missing llm api key")
 	}
+	preferredRuntime := strings.TrimSpace(seed.Runtime)
+	if preferredRuntime == "llm" {
+		return a.tryRunMultiAgentJSONTask(ctx, username, task, prompt, historySnippet, allowedTools, childSessionID, seedHistory, seed)
+	}
 	if len(allowedTools) > 0 {
-		if summary, runtime, trace, toolRisks, err := a.tryRunMultiAgentToolCallingTask(ctx, username, task, prompt, historySnippet, allowedTools, childSessionID, seedHistory); err == nil {
+		if summary, runtime, trace, toolRisks, err := a.tryRunMultiAgentToolCallingTask(ctx, username, task, prompt, historySnippet, allowedTools, childSessionID, seedHistory, seed); err == nil {
 			return summary, runtime, trace, toolRisks, nil
 		}
 	}
-	return a.tryRunMultiAgentJSONTask(ctx, username, task, prompt, historySnippet, allowedTools, childSessionID, seedHistory)
+	return a.tryRunMultiAgentJSONTask(ctx, username, task, prompt, historySnippet, allowedTools, childSessionID, seedHistory, seed)
 }
 
-func (a *App) tryRunMultiAgentToolCallingTask(ctx context.Context, username string, task multiagent.Task, prompt, historySnippet string, allowedTools []tools.Tool, childSessionID int64, seedHistory []llm.Message) (string, string, []multiagent.TraceStep, []string, error) {
+func (a *App) tryRunMultiAgentToolCallingTask(ctx context.Context, username string, task multiagent.Task, prompt, historySnippet string, allowedTools []tools.Tool, childSessionID int64, seedHistory []llm.Message, seed childLoopSeed) (string, string, []multiagent.TraceStep, []string, error) {
 	systemBlocks := []string{
 		"You are a focused child agent working on one delegated subtask.",
 		"Do not delegate further.",
@@ -718,10 +775,18 @@ func (a *App) tryRunMultiAgentToolCallingTask(ctx context.Context, username stri
 	}
 	history := append([]llm.Message(nil), seedHistory...)
 	currentPrompt := prompt
+	if strings.TrimSpace(seed.CurrentPrompt) != "" {
+		currentPrompt = strings.TrimSpace(seed.CurrentPrompt)
+	}
 	trace := make([]multiagent.TraceStep, 0, 8)
-	toolRisks := make([]string, 0, 2)
+	toolRisks := append([]string(nil), seed.ToolRisks...)
 	toolDefs := buildLLMToolDefinitions(allowedTools)
-	for iteration := 1; iteration <= 4; iteration++ {
+	startIteration := 1
+	if seed.NextIteration > 1 {
+		startIteration = seed.NextIteration
+	}
+	for iteration := startIteration; iteration <= 4; iteration++ {
+		trace = append(trace, a.childLoopSnapshot(iteration, task, currentPrompt, history, allowedTools, "llm-toolcalls", toolRisks))
 		completion, err := a.LLM.ChatCompletion(ctx, systemBlocks, history, currentPrompt, toolDefs)
 		if err != nil {
 			return "", "", trace, toolRisks, err
@@ -780,7 +845,7 @@ func (a *App) tryRunMultiAgentToolCallingTask(ctx context.Context, username stri
 	return "Child loop reached iteration cap.", "llm-toolcalls", trace, append(toolRisks, "Child reached iteration cap."), nil
 }
 
-func (a *App) tryRunMultiAgentJSONTask(ctx context.Context, username string, task multiagent.Task, prompt, historySnippet string, allowedTools []tools.Tool, childSessionID int64, seedHistory []llm.Message) (string, string, []multiagent.TraceStep, []string, error) {
+func (a *App) tryRunMultiAgentJSONTask(ctx context.Context, username string, task multiagent.Task, prompt, historySnippet string, allowedTools []tools.Tool, childSessionID int64, seedHistory []llm.Message, seed childLoopSeed) (string, string, []multiagent.TraceStep, []string, error) {
 	systemBlocks := []string{
 		"You are a focused child agent working on one delegated subtask.",
 		"Do not delegate further. Respond with JSON only.",
@@ -803,9 +868,17 @@ func (a *App) tryRunMultiAgentJSONTask(ctx context.Context, username string, tas
 	}
 	history := append([]llm.Message(nil), seedHistory...)
 	currentPrompt := prompt
+	if strings.TrimSpace(seed.CurrentPrompt) != "" {
+		currentPrompt = strings.TrimSpace(seed.CurrentPrompt)
+	}
 	trace := make([]multiagent.TraceStep, 0, 8)
-	toolRisks := make([]string, 0, 2)
-	for iteration := 1; iteration <= 4; iteration++ {
+	toolRisks := append([]string(nil), seed.ToolRisks...)
+	startIteration := 1
+	if seed.NextIteration > 1 {
+		startIteration = seed.NextIteration
+	}
+	for iteration := startIteration; iteration <= 4; iteration++ {
+		trace = append(trace, a.childLoopSnapshot(iteration, task, currentPrompt, history, allowedTools, "llm", toolRisks))
 		response, err := a.LLM.ChatWithMessages(ctx, systemBlocks, history, currentPrompt)
 		if err != nil {
 			return "", "", trace, toolRisks, err
@@ -966,6 +1039,7 @@ func (a *App) persistMultiAgentTrace(ctx context.Context, username string, paren
 	for _, step := range trace {
 		var inputJSON string
 		var outputJSON string
+		var snapshotJSON string
 		if step.Input != nil {
 			raw, _ := json.Marshal(step.Input)
 			inputJSON = string(raw)
@@ -974,19 +1048,27 @@ func (a *App) persistMultiAgentTrace(ctx context.Context, username string, paren
 			raw, _ := json.Marshal(step.Output)
 			outputJSON = string(raw)
 		}
+		if step.Snapshot != nil {
+			raw, _ := json.Marshal(step.Snapshot)
+			snapshotJSON = string(raw)
+		}
 		if err := retryBusy(func() error {
 			return a.Store.InsertMultiAgentTrace(ctx, store.MultiAgentTraceRecord{
-				Username:        username,
-				ParentSessionID: parentSessionID,
-				ChildSessionID:  childSessionID,
-				TaskID:          taskID,
-				Iteration:       step.Iteration,
-				Type:            step.Type,
-				Tool:            step.Tool,
-				InputJSON:       inputJSON,
-				OutputJSON:      outputJSON,
-				Error:           step.Error,
-				Note:            step.Note,
+				Username:          username,
+				ParentSessionID:   parentSessionID,
+				ChildSessionID:    childSessionID,
+				TaskID:            taskID,
+				Iteration:         step.Iteration,
+				Type:              step.Type,
+				Tool:              step.Tool,
+				InputJSON:         inputJSON,
+				OutputJSON:        outputJSON,
+				SnapshotJSON:      snapshotJSON,
+				Verified:          step.Verified,
+				Verifier:          step.Verifier,
+				VerificationClass: step.VerificationClass,
+				Error:             step.Error,
+				Note:              step.Note,
 			})
 		}); err != nil {
 			return err
@@ -1015,9 +1097,29 @@ func buildLLMToolDefinitions(allowedTools []tools.Tool) []llm.ToolDefinition {
 		properties := make(map[string]any, len(tool.InputKeys))
 		required := make([]string, 0, len(tool.InputKeys))
 		for _, key := range tool.InputKeys {
-			properties[key] = map[string]any{
-				"type":        "string",
-				"description": "Tool input value.",
+			switch key {
+			case "vars":
+				properties[key] = map[string]any{
+					"type":                 "object",
+					"description":          "Key/value variables used to render an execution profile.",
+					"additionalProperties": map[string]any{"type": "string"},
+				}
+			case "approved":
+				properties[key] = map[string]any{
+					"type":        "boolean",
+					"description": "Whether execution was explicitly approved.",
+				}
+			case "args":
+				properties[key] = map[string]any{
+					"type":        "array",
+					"description": "Command arguments.",
+					"items":       map[string]any{"type": "string"},
+				}
+			default:
+				properties[key] = map[string]any{
+					"type":        "string",
+					"description": "Tool input value.",
+				}
 			}
 			if key != "username" {
 				required = append(required, key)
@@ -1089,6 +1191,7 @@ func (a *App) executeChildAction(ctx context.Context, username string, iteration
 		return step, "Child tool execution failed: " + action.Tool, llm.Message{}, execErr
 	}
 	step.Output = output
+	step.Verified, step.Verifier, step.VerificationClass = verifyDelegatedToolOutput(action.Tool, output)
 	rawOut, _ := json.Marshal(output)
 	content := string(rawOut)
 	_ = retryBusy(func() error {
@@ -1174,7 +1277,7 @@ func rebuildTaskFromChildSession(ctx context.Context, st *store.Store, session s
 	return task, nil
 }
 
-func deriveResumeBasis(traceRows []store.MultiAgentTraceRecord) ResumeBasis {
+func deriveResumeBasis(traceRows []store.MultiAgentTraceRecord, messages []store.Message) ResumeBasis {
 	var basis ResumeBasis
 	for _, row := range traceRows {
 		if row.Iteration > basis.LastIteration {
@@ -1194,7 +1297,39 @@ func deriveResumeBasis(traceRows []store.MultiAgentTraceRecord) ResumeBasis {
 				}
 			}
 		}
+		if row.SnapshotJSON != "" {
+			var snapshot map[string]any
+			if err := json.Unmarshal([]byte(row.SnapshotJSON), &snapshot); err == nil {
+				basis.LastSnapshot = snapshot
+				if prompt, ok := snapshot["current_prompt"].(string); ok {
+					basis.LastSnapshotPrompt = strings.TrimSpace(prompt)
+				}
+				switch raw := snapshot["history_len"].(type) {
+				case float64:
+					basis.LastSnapshotHistoryLen = int(raw)
+				case int:
+					basis.LastSnapshotHistoryLen = raw
+				}
+				switch raw := snapshot["next_iteration"].(type) {
+				case float64:
+					basis.LastSnapshotNextIteration = int(raw)
+				case int:
+					basis.LastSnapshotNextIteration = raw
+				}
+				if runtime, ok := snapshot["runtime"].(string); ok {
+					basis.LastSnapshotRuntime = strings.TrimSpace(runtime)
+				}
+				if rawHistory, ok := snapshot["history"].([]any); ok {
+					basis.LastSnapshotHistory = decodeSnapshotMessages(rawHistory)
+				}
+				if rawRisks, ok := snapshot["tool_risks"].([]any); ok {
+					basis.LastSnapshotToolRisks = decodeStringSlice(rawRisks)
+				}
+			}
+		}
 	}
+	basis.RecoveredToolStates = collectRecoveredToolStates(traceRows, 3)
+	basis.RecoveredHistoryMessage = len(buildResumeHistoryMessages(messages, 8))
 	return basis
 }
 
@@ -1203,11 +1338,43 @@ func buildResumeContext(childSessionID int64, basis ResumeBasis) string {
 		fmt.Sprintf("Recovery mode: continue from prior child session %d.", childSessionID),
 		fmt.Sprintf("Resume from iteration %d.", basis.LastIteration),
 	}
+	if basis.RecoveredHistoryMessage > 0 {
+		lines = append(lines, fmt.Sprintf("Recovered %d prior assistant/tool history messages.", basis.RecoveredHistoryMessage))
+	}
+	if len(basis.LastSnapshot) > 0 {
+		raw, _ := json.Marshal(basis.LastSnapshot)
+		lines = append(lines, "Recovered loop snapshot: "+string(raw))
+	}
+	if basis.LastSnapshotPrompt != "" {
+		lines = append(lines, "Recovered next prompt candidate: "+basis.LastSnapshotPrompt)
+	}
+	if basis.LastSnapshotHistoryLen > 0 {
+		lines = append(lines, fmt.Sprintf("Recovered snapshot history length: %d", basis.LastSnapshotHistoryLen))
+	}
+	if len(basis.LastSnapshotHistory) > 0 {
+		lines = append(lines, fmt.Sprintf("Recovered exact snapshot history messages: %d", len(basis.LastSnapshotHistory)))
+	}
+	if basis.LastSnapshotNextIteration > 0 {
+		lines = append(lines, fmt.Sprintf("Recovered next iteration: %d", basis.LastSnapshotNextIteration))
+	}
+	if basis.LastSnapshotRuntime != "" {
+		lines = append(lines, "Recovered runtime mode: "+basis.LastSnapshotRuntime)
+	}
+	if len(basis.LastSnapshotToolRisks) > 0 {
+		lines = append(lines, "Recovered tool risks: "+strings.Join(basis.LastSnapshotToolRisks, "; "))
+	}
 	if basis.LastSuccessfulTool != "" {
 		lines = append(lines, "Last successful tool: "+basis.LastSuccessfulTool)
 		if basis.LastSuccessfulOut != "" {
 			lines = append(lines, "Last successful output: "+basis.LastSuccessfulOut)
 		}
+	}
+	if len(basis.RecoveredToolStates) > 0 {
+		summaries := make([]string, 0, len(basis.RecoveredToolStates))
+		for _, state := range basis.RecoveredToolStates {
+			summaries = append(summaries, fmt.Sprintf("%s@%d", state.Tool, state.Iteration))
+		}
+		lines = append(lines, "Recovered tool states: "+strings.Join(summaries, ", "))
 	}
 	if basis.LastFailedTool != "" {
 		lines = append(lines, "Last failed tool: "+basis.LastFailedTool)
@@ -1220,18 +1387,241 @@ func buildResumeContext(childSessionID int64, basis ResumeBasis) string {
 	return strings.Join(lines, "\n")
 }
 
-func buildResumeSeedHistory(basis ResumeBasis) []llm.Message {
+func buildResumeSeedHistory(messages []store.Message, basis ResumeBasis) []llm.Message {
+	if len(basis.LastSnapshotHistory) > 0 {
+		seedHistory := append([]llm.Message(nil), basis.LastSnapshotHistory...)
+		for _, state := range basis.RecoveredToolStates {
+			if state.Output == "" {
+				continue
+			}
+			seedHistory = append(seedHistory, llm.Message{
+				Role:    "tool",
+				Name:    state.Tool,
+				Content: state.Output,
+			})
+		}
+		return seedHistory
+	}
+	seedHistory := buildResumeHistoryMessages(messages, 8)
+	if len(seedHistory) > 0 {
+		return seedHistory
+	}
 	if basis.LastSuccessfulTool == "" || strings.TrimSpace(basis.LastSuccessfulOut) == "" {
 		return nil
 	}
-	return []llm.Message{
-		llm.NewMessage("assistant", "Recovered prior successful tool state for resume."),
-		{
-			Role:    "tool",
-			Name:    basis.LastSuccessfulTool,
-			Content: basis.LastSuccessfulOut,
-		},
+	return []llm.Message{{
+		Role:    "tool",
+		Name:    basis.LastSuccessfulTool,
+		Content: basis.LastSuccessfulOut,
+	}}
+}
+
+func buildResumeLoopSeed(basis ResumeBasis) childLoopSeed {
+	nextIteration := basis.LastSnapshotNextIteration
+	if nextIteration <= 0 {
+		nextIteration = basis.LastIteration + 1
 	}
+	return childLoopSeed{
+		CurrentPrompt: strings.TrimSpace(basis.LastSnapshotPrompt),
+		NextIteration: nextIteration,
+		Runtime:       strings.TrimSpace(basis.LastSnapshotRuntime),
+		ToolRisks:     append([]string(nil), basis.LastSnapshotToolRisks...),
+	}
+}
+
+func collectRecoveredToolStates(traceRows []store.MultiAgentTraceRecord, limit int) []ResumeToolState {
+	if limit <= 0 {
+		limit = 3
+	}
+	states := make([]ResumeToolState, 0, limit)
+	for i := len(traceRows) - 1; i >= 0 && len(states) < limit; i-- {
+		row := traceRows[i]
+		if row.Tool == "" || row.Error != "" || strings.TrimSpace(row.OutputJSON) == "" {
+			continue
+		}
+		states = append(states, ResumeToolState{
+			Iteration: row.Iteration,
+			Tool:      row.Tool,
+			Output:    row.OutputJSON,
+		})
+	}
+	for i, j := 0, len(states)-1; i < j; i, j = i+1, j-1 {
+		states[i], states[j] = states[j], states[i]
+	}
+	return states
+}
+
+func buildResumeHistoryMessages(messages []store.Message, limit int) []llm.Message {
+	if limit <= 0 {
+		limit = 8
+	}
+	filtered := make([]store.Message, 0, limit)
+	for i := len(messages) - 1; i >= 0 && len(filtered) < limit; i-- {
+		msg := messages[i]
+		if msg.Role != "assistant" && msg.Role != "tool" {
+			continue
+		}
+		if strings.TrimSpace(msg.Content) == "" {
+			continue
+		}
+		filtered = append(filtered, msg)
+	}
+	for i, j := 0, len(filtered)-1; i < j; i, j = i+1, j-1 {
+		filtered[i], filtered[j] = filtered[j], filtered[i]
+	}
+	result := make([]llm.Message, 0, len(filtered))
+	for _, msg := range filtered {
+		switch msg.Role {
+		case "assistant":
+			result = append(result, llm.NewMessage("assistant", msg.Content))
+		case "tool":
+			name, content := parseStoredToolMessage(msg.Content)
+			toolMsg := llm.Message{
+				Role:    "tool",
+				Content: content,
+				Name:    name,
+			}
+			result = append(result, toolMsg)
+		}
+	}
+	return result
+}
+
+func decodeStringSlice(values []any) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if str, ok := value.(string); ok && strings.TrimSpace(str) != "" {
+			result = append(result, strings.TrimSpace(str))
+		}
+	}
+	return result
+}
+
+func parseStoredToolMessage(content string) (string, string) {
+	for _, marker := range []string{" result: ", " error: "} {
+		if idx := strings.Index(content, marker); idx > 0 {
+			return strings.TrimSpace(content[:idx]), strings.TrimSpace(content[idx+len(marker):])
+		}
+	}
+	return "", strings.TrimSpace(content)
+}
+
+func (a *App) childLoopSnapshot(iteration int, task multiagent.Task, currentPrompt string, history []llm.Message, allowedTools []tools.Tool, runtime string, toolRisks []string) multiagent.TraceStep {
+	toolNames := make([]string, 0, len(allowedTools))
+	for _, tool := range allowedTools {
+		toolNames = append(toolNames, tool.Name)
+	}
+	historySnapshot := make([]map[string]any, 0, len(history))
+	for _, msg := range history {
+		entry := map[string]any{
+			"role":    msg.Role,
+			"content": strings.TrimSpace(msg.Content),
+		}
+		if strings.TrimSpace(msg.Name) != "" {
+			entry["name"] = strings.TrimSpace(msg.Name)
+		}
+		if strings.TrimSpace(msg.ToolCallID) != "" {
+			entry["tool_call_id"] = strings.TrimSpace(msg.ToolCallID)
+		}
+		if len(msg.ToolCalls) > 0 {
+			toolCalls := make([]map[string]any, 0, len(msg.ToolCalls))
+			for _, call := range msg.ToolCalls {
+				toolCalls = append(toolCalls, map[string]any{
+					"id":   call.ID,
+					"type": call.Type,
+					"function": map[string]any{
+						"name":      call.Function.Name,
+						"arguments": call.Function.Arguments,
+					},
+				})
+			}
+			entry["tool_calls"] = toolCalls
+		}
+		historySnapshot = append(historySnapshot, entry)
+	}
+	return multiagent.TraceStep{
+		Iteration: iteration,
+		Type:      "snapshot",
+		Snapshot: map[string]any{
+			"task_id":        task.ID,
+			"current_prompt": strings.TrimSpace(currentPrompt),
+			"history_len":    len(history),
+			"history":        historySnapshot,
+			"allowed_tools":  toolNames,
+			"next_iteration": iteration + 1,
+			"runtime":        strings.TrimSpace(runtime),
+			"tool_risks":     append([]string(nil), toolRisks...),
+		},
+		Note: "child loop snapshot",
+	}
+}
+
+func verifyDelegatedToolOutput(toolName string, output map[string]any) (bool, string, string) {
+	switch toolName {
+	case "session.search":
+		_, ok := output["results"]
+		if ok {
+			return true, "results field check", "ok"
+		}
+		return false, "results field check", "missing_results_field"
+	case "session.history":
+		_, ok := output["sessions"]
+		if ok {
+			return true, "sessions field check", "ok"
+		}
+		return false, "sessions field check", "missing_sessions_field"
+	case "memory.read":
+		_, ok := output["memory"]
+		if ok {
+			return true, "memory field check", "ok"
+		}
+		return false, "memory field check", "missing_memory_field"
+	case "system.exec_profile":
+		_, ok := output["results"]
+		if ok {
+			return true, "execution profile results check", "ok"
+		}
+		return false, "execution profile results check", "missing_results_field"
+	default:
+		if len(output) > 0 {
+			return true, "non-empty output check", "ok"
+		}
+		return false, "non-empty output check", "empty_output"
+	}
+}
+
+func decodeSnapshotMessages(rawHistory []any) []llm.Message {
+	result := make([]llm.Message, 0, len(rawHistory))
+	for _, raw := range rawHistory {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		msg := llm.Message{}
+		msg.Role, _ = entry["role"].(string)
+		msg.Content, _ = entry["content"].(string)
+		msg.Name, _ = entry["name"].(string)
+		msg.ToolCallID, _ = entry["tool_call_id"].(string)
+		if rawCalls, ok := entry["tool_calls"].([]any); ok {
+			msg.ToolCalls = make([]llm.ToolCall, 0, len(rawCalls))
+			for _, rawCall := range rawCalls {
+				callMap, ok := rawCall.(map[string]any)
+				if !ok {
+					continue
+				}
+				call := llm.ToolCall{}
+				call.ID, _ = callMap["id"].(string)
+				call.Type, _ = callMap["type"].(string)
+				if fn, ok := callMap["function"].(map[string]any); ok {
+					call.Function.Name, _ = fn["name"].(string)
+					call.Function.Arguments, _ = fn["arguments"].(string)
+				}
+				msg.ToolCalls = append(msg.ToolCalls, call)
+			}
+		}
+		result = append(result, msg)
+	}
+	return result
 }
 
 func retryBusy(fn func() error) error {

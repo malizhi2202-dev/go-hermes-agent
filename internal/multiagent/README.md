@@ -15,10 +15,24 @@
 - 支持 `parallel` 和 `sequential`
 - 支持 parent / child session 串联
 - 支持结构化 `trace`
+- 支持 child loop `snapshot`
+- 支持 delegated tool `verifier`
+- 支持 verifier 失败分类
 - 支持 trace summary / failure analysis
 - 支持 child tool allowlist
 - 支持原生 tool-calling 优先、JSON 协议回退
 - 支持 replay / resume
+- `resume` 会优先恢复 snapshot 中保存的精确 loop history、next iteration、runtime 模式和累计 tool risks，再叠加最近成功的 tool state
+
+可观测接口：
+
+- `/v1/multiagent/traces`
+- `/v1/multiagent/traces/summary`
+- `/v1/multiagent/traces/verifiers`
+- `/v1/multiagent/traces/failures`
+- `/v1/multiagent/traces/hotspots`
+- `/v1/multiagent/replay`
+- `/v1/multiagent/resume`
 
 当前未完成项：
 

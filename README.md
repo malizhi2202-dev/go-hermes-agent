@@ -12,6 +12,7 @@
 - 内建文件记忆与回忆注入
 - 受限版 Tool Registry
 - 受控动态扩展面：plugin / skill script / MCP
+- 受控 execution profile / extension lifecycle hook
 - 基础 Webhook / Telegram Gateway 适配
 - 基础 Webhook / Telegram / Slack Gateway 适配
 - OpenAI 兼容 LLM 调用边界
@@ -24,7 +25,10 @@
 - `plugin.yaml` 声明式插件发现与工具注册
 - `SKILL.md + skill.yaml` 的 skill script 发现与受控执行
 - `mcp_servers` 配置驱动的 stdio / HTTP MCP 工具发现与调用
+- lifecycle hooks：`validate / on_enable / on_disable`
 - `/v1/extensions`、`/v1/extensions/refresh`、`/v1/extensions/state` 扩展查询/刷新/启停接口
+- `/v1/extensions/validate` 扩展验证接口
+- `/v1/extensions/hooks` 扩展 hook 结果视图
 - 插件与 skill 的 SQLite 启停状态持久化
 - 基于内容 hash 的基础完整性标记，检测“数据库状态对应的扩展内容已变化”
 
@@ -73,13 +77,19 @@
 - child runtime 现在优先尝试原生 tool-calling，并在不支持时回退到 JSON 协议
 - `run` 返回的每个 child result 现在会附带结构化 `trace`
 - `trace` 也已经持久化到 `multiagent_traces`，可通过 `/v1/multiagent/traces` 查询
+- `trace` 现在包含 child loop `snapshot`、delegated tool `verifier` 和 `verification_class` 信息
 - `/v1/multiagent/traces/summary` 可以看工具级聚合和失败统计
+- `/v1/multiagent/traces/verifiers` 可以看 verifier 成功/失败分类聚合
 - `/v1/multiagent/traces/failures` 可以只看失败轨迹
 - `/v1/multiagent/traces/hotspots` 可以看 child/task 维度的失败热点
 - 上面这些 traces 视图都支持 `from/to` 的 RFC3339 时间过滤
 - `GET /v1/multiagent/replay` 可以按 `child_session_id` 回放 child session、trace 和恢复提示
-- `POST /v1/multiagent/resume` 现在会按最后成功/失败 trace step 生成恢复依据，并把最后一次成功 tool state 作为真实初始历史喂回 child loop
-- `webhook / telegram` 现在支持 `/multiagent ...` 命令路由
+- `POST /v1/multiagent/resume` 现在会按最后成功/失败 trace step 生成恢复依据，并优先回放 snapshot 中保存的精确 loop history、next iteration、runtime 模式和累计 tool risks，再把成功 tool state 喂回 child loop
+- `webhook / telegram / slack` 现在支持 `/multiagent ...` 命令路由
+- Slack 现在支持 `slash command`、`url_verification`、`event_callback`、事件去重和 `chat.postMessage` 回复
+- execution 现在支持配置驱动的 `profile -> steps` 受控执行链，可通过 `system.exec_profile` 调用
+- `system.exec_profile` 已可进入 child delegated runtime，并支持 approval / capability token / rollback profile
+- `/v1/audit/execution/profiles` 现在提供 `exec_profile` 专门的记录、action 聚合和 profile 聚合视图
 - 这意味着 Go 版已经有“真实 child runtime 第一版”，但还没开放递归子代理和高风险 delegated runtime
 
 已明确不直接迁移的高风险能力：
@@ -214,7 +224,7 @@ go build -o bin/hermesctl ./cmd/hermesctl
 - `internal/extensions`：plugin / skill / MCP 扩展发现、注册与受控执行
 - `internal/extensions/README.md`：扩展面说明
 - `internal/gateway`：基础 webhook / telegram gateway 适配
-- 当前也包含 Slack slash command 适配
+- 当前也包含 Slack slash command / events 适配
 - `internal/gateway/README.md`：gateway 适配与 `/multiagent` 路由说明
 - `internal/execution`：受控版高风险动态执行边界
 - `internal/execution/README.md`：受控执行说明
@@ -242,9 +252,5 @@ go build -o bin/hermesctl ./cmd/hermesctl
 
 ## Go 文档导航
 
-- [Go 版本架构总结](/home/malizhi/project/hermes-agent/go/docs/architecture/go-architecture-summary.md)
-- [Go 版本执行流程图](/home/malizhi/project/hermes-agent/go/docs/architecture/go-execution-flow.md)
-- [Go 版本设计图](/home/malizhi/project/hermes-agent/go/docs/architecture/go-design-diagram.md)
-- [Agent 常见问题与 Hermes 工程对应拆解](/home/malizhi/project/hermes-agent/go/docs/architecture/agent-concepts-vs-hermes.md)
-- [Go 多 Agent 优化说明](/home/malizhi/project/hermes-agent/go/docs/architecture/multiagent-optimization-notes.md)
+- [Go Hermes-Agent 完整总文档](/home/malizhi/project/hermes-agent/go/docs/delivery/go-complete-architecture-and-optimization.md)
 - [Go 迁移差距清单](/home/malizhi/project/hermes-agent/go/docs/migration/go-gap-checklist.md)

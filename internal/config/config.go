@@ -96,17 +96,19 @@ type TelegramGatewayConfig struct {
 type SlackGatewayConfig struct {
 	Enabled          bool   `yaml:"enabled"`
 	SigningSecretEnv string `yaml:"signing_secret_env"`
+	BotTokenEnv      string `yaml:"bot_token_env"`
 }
 
 // ExecutionConfig controls the constrained command execution runtime.
 type ExecutionConfig struct {
-	Enabled         bool                   `yaml:"enabled"`
-	TimeoutSeconds  int                    `yaml:"timeout_seconds"`
-	AllowedCommands []string               `yaml:"allowed_commands"`
-	MaxArgs         int                    `yaml:"max_args"`
-	MaxArgLength    int                    `yaml:"max_arg_length"`
-	MaxOutputBytes  int                    `yaml:"max_output_bytes"`
-	CommandRules    map[string]CommandRule `yaml:"command_rules"`
+	Enabled         bool                        `yaml:"enabled"`
+	TimeoutSeconds  int                         `yaml:"timeout_seconds"`
+	AllowedCommands []string                    `yaml:"allowed_commands"`
+	MaxArgs         int                         `yaml:"max_args"`
+	MaxArgLength    int                         `yaml:"max_arg_length"`
+	MaxOutputBytes  int                         `yaml:"max_output_bytes"`
+	CommandRules    map[string]CommandRule      `yaml:"command_rules"`
+	Profiles        map[string]ExecutionProfile `yaml:"profiles"`
 }
 
 // CommandRule holds per-command execution limits.
@@ -116,6 +118,22 @@ type CommandRule struct {
 	MaxOutputBytes     int      `yaml:"max_output_bytes"`
 	AllowedArgPrefixes []string `yaml:"allowed_arg_prefixes"`
 	DeniedSubstrings   []string `yaml:"denied_substrings"`
+}
+
+// ExecutionProfile describes one controlled multi-step execution chain.
+type ExecutionProfile struct {
+	ContinueOnError bool            `yaml:"continue_on_error"`
+	RequireApproval bool            `yaml:"require_approval"`
+	CapabilityToken string          `yaml:"capability_token"`
+	RollbackProfile string          `yaml:"rollback_profile"`
+	Steps           []ExecutionStep `yaml:"steps"`
+}
+
+// ExecutionStep is one command step inside an execution profile.
+type ExecutionStep struct {
+	Name         string   `yaml:"name"`
+	Command      string   `yaml:"command"`
+	ArgsTemplate []string `yaml:"args_template"`
 }
 
 // ExtensionConfig configures plugin and skill discovery roots.
@@ -229,6 +247,7 @@ func Default() Config {
 			Slack: SlackGatewayConfig{
 				Enabled:          false,
 				SigningSecretEnv: "SLACK_SIGNING_SECRET",
+				BotTokenEnv:      "SLACK_BOT_TOKEN",
 			},
 		},
 		Execution: ExecutionConfig{
@@ -249,6 +268,24 @@ func Default() Config {
 					MaxArgLength:       64,
 					MaxOutputBytes:     512,
 					AllowedArgPrefixes: []string{"+", "--iso"},
+				},
+			},
+			Profiles: map[string]ExecutionProfile{
+				"system-health": {
+					ContinueOnError: false,
+					RequireApproval: false,
+					Steps: []ExecutionStep{
+						{
+							Name:         "echo",
+							Command:      "echo",
+							ArgsTemplate: []string{"system health check"},
+						},
+						{
+							Name:         "date",
+							Command:      "date",
+							ArgsTemplate: []string{"+%Y-%m-%dT%H:%M:%SZ"},
+						},
+					},
 				},
 			},
 		},
@@ -360,6 +397,19 @@ func (c Config) Validate() error {
 	}
 	if c.Execution.MaxOutputBytes <= 0 {
 		return fmt.Errorf("execution.max_output_bytes must be > 0")
+	}
+	for name, profile := range c.Execution.Profiles {
+		if len(profile.Steps) == 0 {
+			return fmt.Errorf("execution.profiles.%s.steps must not be empty", name)
+		}
+		if profile.RollbackProfile != "" && profile.RollbackProfile == name {
+			return fmt.Errorf("execution.profiles.%s.rollback_profile must not reference itself", name)
+		}
+		for index, step := range profile.Steps {
+			if strings.TrimSpace(step.Command) == "" {
+				return fmt.Errorf("execution.profiles.%s.steps.%d.command is required", name, index)
+			}
+		}
 	}
 	for name, server := range c.MCPServers {
 		if !server.Enabled {

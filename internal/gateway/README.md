@@ -6,7 +6,7 @@
 
 - `webhook.go`：通用 webhook 入口
 - `telegram.go`：Telegram webhook 适配
-- `slack.go`：Slack slash command 适配
+- `slack.go`：Slack slash command / events 适配
 - `commands.go`：gateway 命令解析
 
 当前能力：
@@ -15,6 +15,9 @@
 - Telegram update 去重
 - Telegram 发送失败重试
 - Slack 签名校验
+- Slack URL verification
+- Slack event 去重
+- Slack `chat.postMessage` 回复
 - chat/user 维度最小会话隔离
 - `/multiagent ...` 命令路由到多 Agent 执行链
 

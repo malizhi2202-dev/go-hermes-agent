@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -104,6 +105,30 @@ type ExtensionState struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// ExtensionHookRecord stores one lifecycle hook execution result.
+type ExtensionHookRecord struct {
+	ID        int64     `json:"id"`
+	Username  string    `json:"username"`
+	Kind      string    `json:"kind"`
+	Name      string    `json:"name"`
+	Phase     string    `json:"phase"`
+	Hook      string    `json:"hook"`
+	Status    string    `json:"status"`
+	Output    string    `json:"output,omitempty"`
+	Error     string    `json:"error,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ExtensionHookFilters scopes lifecycle hook result queries.
+type ExtensionHookFilters struct {
+	Username string
+	Kind     string
+	Name     string
+	Phase    string
+	Limit    int
+	Offset   int
+}
+
 // ContextSummary stores the persisted compressed summary for one user.
 type ContextSummary struct {
 	Username  string    `json:"username"`
@@ -114,19 +139,23 @@ type ContextSummary struct {
 
 // MultiAgentTraceRecord stores one structured child-agent trajectory step.
 type MultiAgentTraceRecord struct {
-	ID              int64     `json:"id"`
-	Username        string    `json:"username"`
-	ParentSessionID int64     `json:"parent_session_id"`
-	ChildSessionID  int64     `json:"child_session_id"`
-	TaskID          string    `json:"task_id"`
-	Iteration       int       `json:"iteration"`
-	Type            string    `json:"type"`
-	Tool            string    `json:"tool,omitempty"`
-	InputJSON       string    `json:"input_json,omitempty"`
-	OutputJSON      string    `json:"output_json,omitempty"`
-	Error           string    `json:"error,omitempty"`
-	Note            string    `json:"note,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
+	ID                int64     `json:"id"`
+	Username          string    `json:"username"`
+	ParentSessionID   int64     `json:"parent_session_id"`
+	ChildSessionID    int64     `json:"child_session_id"`
+	TaskID            string    `json:"task_id"`
+	Iteration         int       `json:"iteration"`
+	Type              string    `json:"type"`
+	Tool              string    `json:"tool,omitempty"`
+	InputJSON         string    `json:"input_json,omitempty"`
+	OutputJSON        string    `json:"output_json,omitempty"`
+	SnapshotJSON      string    `json:"snapshot_json,omitempty"`
+	Verified          bool      `json:"verified"`
+	Verifier          string    `json:"verifier,omitempty"`
+	VerificationClass string    `json:"verification_class,omitempty"`
+	Error             string    `json:"error,omitempty"`
+	Note              string    `json:"note,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 // MultiAgentTraceFilters scopes multi-agent trace queries.
@@ -158,6 +187,22 @@ type MultiAgentTraceHotspot struct {
 	TaskID          string `json:"task_id"`
 	Total           int    `json:"total"`
 	Failures        int    `json:"failures"`
+}
+
+// MultiAgentVerifierSummary summarizes delegated tool verification outcomes.
+type MultiAgentVerifierSummary struct {
+	Tool              string `json:"tool"`
+	Verifier          string `json:"verifier"`
+	VerificationClass string `json:"verification_class,omitempty"`
+	Verified          int    `json:"verified"`
+	Failed            int    `json:"failed"`
+	Total             int    `json:"total"`
+}
+
+// AuditActionSummary groups audit events by action.
+type AuditActionSummary struct {
+	Action string `json:"action"`
+	Total  int    `json:"total"`
 }
 
 // Open opens or creates the SQLite database and applies the required schema.
@@ -239,6 +284,18 @@ CREATE TABLE IF NOT EXISTS extension_states (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (kind, name)
 );
+CREATE TABLE IF NOT EXISTS extension_hook_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    hook TEXT NOT NULL,
+    status TEXT NOT NULL,
+    output TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS context_summaries (
     username TEXT NOT NULL PRIMARY KEY,
     summary TEXT NOT NULL,
@@ -256,6 +313,10 @@ CREATE TABLE IF NOT EXISTS multiagent_traces (
     tool TEXT NOT NULL DEFAULT '',
     input_json TEXT NOT NULL DEFAULT '',
     output_json TEXT NOT NULL DEFAULT '',
+    snapshot_json TEXT NOT NULL DEFAULT '',
+    verified INTEGER NOT NULL DEFAULT 0,
+    verifier TEXT NOT NULL DEFAULT '',
+    verification_class TEXT NOT NULL DEFAULT '',
     error TEXT NOT NULL DEFAULT '',
     note TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
@@ -273,6 +334,18 @@ CREATE INDEX IF NOT EXISTS idx_multiagent_traces_child ON multiagent_traces(chil
 	}
 	if err := ensureColumn(db, "sessions", "parent_session_id", "INTEGER"); err != nil {
 		return nil, fmt.Errorf("ensure sessions.parent_session_id: %w", err)
+	}
+	if err := ensureColumn(db, "multiagent_traces", "snapshot_json", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, fmt.Errorf("ensure multiagent_traces.snapshot_json: %w", err)
+	}
+	if err := ensureColumn(db, "multiagent_traces", "verified", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return nil, fmt.Errorf("ensure multiagent_traces.verified: %w", err)
+	}
+	if err := ensureColumn(db, "multiagent_traces", "verifier", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, fmt.Errorf("ensure multiagent_traces.verifier: %w", err)
+	}
+	if err := ensureColumn(db, "multiagent_traces", "verification_class", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, fmt.Errorf("ensure multiagent_traces.verification_class: %w", err)
 	}
 	return &Store{db: db}, nil
 }
@@ -301,6 +374,13 @@ func ensureColumn(db *sql.DB, table, column, definition string) error {
 	}
 	_, err = db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition))
 	return err
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 // Close closes the underlying SQLite connection.
@@ -414,6 +494,76 @@ ORDER BY kind, name`)
 	return states, rows.Err()
 }
 
+// InsertExtensionHookRun persists one lifecycle hook execution result.
+func (s *Store) InsertExtensionHookRun(ctx context.Context, record ExtensionHookRecord) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO extension_hook_runs (username, kind, name, phase, hook, status, output, error, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		record.Username,
+		record.Kind,
+		record.Name,
+		record.Phase,
+		record.Hook,
+		record.Status,
+		record.Output,
+		record.Error,
+		time.Now().UTC().Format(time.RFC3339),
+	)
+	return err
+}
+
+// ListExtensionHookRuns returns persisted lifecycle hook results.
+func (s *Store) ListExtensionHookRuns(ctx context.Context, filters ExtensionHookFilters) ([]ExtensionHookRecord, error) {
+	if filters.Limit <= 0 {
+		filters.Limit = 50
+	}
+	if filters.Offset < 0 {
+		filters.Offset = 0
+	}
+	query := `
+SELECT id, username, kind, name, phase, hook, status, output, error, created_at
+FROM extension_hook_runs
+WHERE 1=1`
+	args := make([]any, 0, 6)
+	if filters.Username != "" {
+		query += ` AND username = ?`
+		args = append(args, filters.Username)
+	}
+	if filters.Kind != "" {
+		query += ` AND kind = ?`
+		args = append(args, filters.Kind)
+	}
+	if filters.Name != "" {
+		query += ` AND name = ?`
+		args = append(args, filters.Name)
+	}
+	if filters.Phase != "" {
+		query += ` AND phase = ?`
+		args = append(args, filters.Phase)
+	}
+	query += ` ORDER BY id DESC LIMIT ? OFFSET ?`
+	args = append(args, filters.Limit, filters.Offset)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []ExtensionHookRecord
+	for rows.Next() {
+		var record ExtensionHookRecord
+		var createdAt string
+		if err := rows.Scan(&record.ID, &record.Username, &record.Kind, &record.Name, &record.Phase, &record.Hook, &record.Status, &record.Output, &record.Error, &createdAt); err != nil {
+			return nil, err
+		}
+		record.CreatedAt, err = time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
 // GetContextSummary returns the stored compressed context summary for a user.
 func (s *Store) GetContextSummary(ctx context.Context, username string) (ContextSummary, error) {
 	row := s.db.QueryRowContext(ctx, `
@@ -476,7 +626,11 @@ WHERE 1=1`
 		args = append(args, filters.Username)
 	}
 	if filters.Action != "" {
-		query += ` AND action = ?`
+		operator := "="
+		if strings.Contains(filters.Action, "%") || strings.Contains(filters.Action, "_") {
+			operator = "LIKE"
+		}
+		query += ` AND action ` + operator + ` ?`
 		args = append(args, filters.Action)
 	}
 	if !filters.FromTime.IsZero() {
@@ -508,6 +662,46 @@ WHERE 1=1`
 		records = append(records, record)
 	}
 	return records, rows.Err()
+}
+
+// SummarizeAuditActions groups audit events by action name.
+func (s *Store) SummarizeAuditActions(ctx context.Context, filters AuditFilters) ([]AuditActionSummary, error) {
+	query := `
+SELECT action, COUNT(*) AS total
+FROM audit_log
+WHERE 1=1`
+	args := make([]any, 0, 6)
+	if filters.Username != "" {
+		query += ` AND username = ?`
+		args = append(args, filters.Username)
+	}
+	if filters.Action != "" {
+		query += ` AND action LIKE ?`
+		args = append(args, filters.Action)
+	}
+	if !filters.FromTime.IsZero() {
+		query += ` AND created_at >= ?`
+		args = append(args, filters.FromTime.UTC().Format(time.RFC3339))
+	}
+	if !filters.ToTime.IsZero() {
+		query += ` AND created_at <= ?`
+		args = append(args, filters.ToTime.UTC().Format(time.RFC3339))
+	}
+	query += ` GROUP BY action ORDER BY total DESC, action ASC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var summaries []AuditActionSummary
+	for rows.Next() {
+		var summary AuditActionSummary
+		if err := rows.Scan(&summary.Action, &summary.Total); err != nil {
+			return nil, err
+		}
+		summaries = append(summaries, summary)
+	}
+	return summaries, rows.Err()
 }
 
 // CreateSessionOptions controls extra metadata recorded for a session.
@@ -623,8 +817,8 @@ func (s *Store) InsertMultiAgentTrace(ctx context.Context, record MultiAgentTrac
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO multiagent_traces (
     username, parent_session_id, child_session_id, task_id, iteration, type, tool,
-    input_json, output_json, error, note, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    input_json, output_json, snapshot_json, verified, verifier, verification_class, error, note, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.Username,
 		record.ParentSessionID,
 		record.ChildSessionID,
@@ -634,6 +828,10 @@ INSERT INTO multiagent_traces (
 		record.Tool,
 		record.InputJSON,
 		record.OutputJSON,
+		record.SnapshotJSON,
+		boolToInt(record.Verified),
+		record.Verifier,
+		record.VerificationClass,
 		record.Error,
 		record.Note,
 		time.Now().UTC().Format(time.RFC3339),
@@ -651,7 +849,7 @@ func (s *Store) ListMultiAgentTraces(ctx context.Context, filters MultiAgentTrac
 	}
 	query := `
 SELECT id, username, parent_session_id, child_session_id, task_id, iteration, type, tool,
-       input_json, output_json, error, note, created_at
+       input_json, output_json, snapshot_json, verified, verifier, verification_class, error, note, created_at
 FROM multiagent_traces
 WHERE 1=1`
 	args := make([]any, 0, 8)
@@ -701,6 +899,10 @@ WHERE 1=1`
 			&record.Tool,
 			&record.InputJSON,
 			&record.OutputJSON,
+			&record.SnapshotJSON,
+			&record.Verified,
+			&record.Verifier,
+			&record.VerificationClass,
 			&record.Error,
 			&record.Note,
 			&createdAt,
@@ -726,7 +928,7 @@ func (s *Store) ListMultiAgentTraceFailures(ctx context.Context, filters MultiAg
 	}
 	query := `
 SELECT id, username, parent_session_id, child_session_id, task_id, iteration, type, tool,
-       input_json, output_json, error, note, created_at
+       input_json, output_json, snapshot_json, verified, verifier, verification_class, error, note, created_at
 FROM multiagent_traces
 WHERE error <> ''`
 	args := make([]any, 0, 8)
@@ -768,7 +970,7 @@ WHERE error <> ''`
 		if err := rows.Scan(
 			&record.ID, &record.Username, &record.ParentSessionID, &record.ChildSessionID,
 			&record.TaskID, &record.Iteration, &record.Type, &record.Tool,
-			&record.InputJSON, &record.OutputJSON, &record.Error, &record.Note, &createdAt,
+			&record.InputJSON, &record.OutputJSON, &record.SnapshotJSON, &record.Verified, &record.Verifier, &record.VerificationClass, &record.Error, &record.Note, &createdAt,
 		); err != nil {
 			return nil, err
 		}
@@ -889,6 +1091,57 @@ ORDER BY failures DESC, total DESC, child_session_id DESC`
 		hotspots = append(hotspots, hotspot)
 	}
 	return hotspots, rows.Err()
+}
+
+// SummarizeMultiAgentVerifierResults groups verification outcomes by tool and verifier.
+func (s *Store) SummarizeMultiAgentVerifierResults(ctx context.Context, filters MultiAgentTraceFilters) ([]MultiAgentVerifierSummary, error) {
+	query := `
+SELECT tool, verifier, verification_class,
+       SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END) AS verified_count,
+       SUM(CASE WHEN verified = 0 AND verifier <> '' THEN 1 ELSE 0 END) AS failed_count,
+       COUNT(*) AS total
+FROM multiagent_traces
+WHERE verifier <> ''`
+	args := make([]any, 0, 8)
+	if filters.Username != "" {
+		query += ` AND username = ?`
+		args = append(args, filters.Username)
+	}
+	if filters.ParentSessionID > 0 {
+		query += ` AND parent_session_id = ?`
+		args = append(args, filters.ParentSessionID)
+	}
+	if filters.ChildSessionID > 0 {
+		query += ` AND child_session_id = ?`
+		args = append(args, filters.ChildSessionID)
+	}
+	if filters.TaskID != "" {
+		query += ` AND task_id = ?`
+		args = append(args, filters.TaskID)
+	}
+	if !filters.FromTime.IsZero() {
+		query += ` AND created_at >= ?`
+		args = append(args, filters.FromTime.UTC().Format(time.RFC3339))
+	}
+	if !filters.ToTime.IsZero() {
+		query += ` AND created_at <= ?`
+		args = append(args, filters.ToTime.UTC().Format(time.RFC3339))
+	}
+	query += ` GROUP BY tool, verifier, verification_class ORDER BY failed_count DESC, total DESC, tool ASC, verification_class ASC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var summaries []MultiAgentVerifierSummary
+	for rows.Next() {
+		var summary MultiAgentVerifierSummary
+		if err := rows.Scan(&summary.Tool, &summary.Verifier, &summary.VerificationClass, &summary.Verified, &summary.Failed, &summary.Total); err != nil {
+			return nil, err
+		}
+		summaries = append(summaries, summary)
+	}
+	return summaries, rows.Err()
 }
 
 // GetMessages returns all messages for a session.

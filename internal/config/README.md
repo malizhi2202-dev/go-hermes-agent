@@ -10,6 +10,7 @@
 - execution
 - extensions
 - MCP servers
+- execution profiles
 
 设计原则：
 

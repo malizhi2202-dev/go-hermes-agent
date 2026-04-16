@@ -28,38 +28,57 @@ type ToolSpec struct {
 	InputKeys      []string          `yaml:"input_keys" json:"input_keys"`
 }
 
+// HookSpec describes one controlled lifecycle hook command.
+type HookSpec struct {
+	Name           string            `yaml:"name" json:"name"`
+	Command        string            `yaml:"command" json:"command"`
+	ArgsTemplate   []string          `yaml:"args_template" json:"args_template"`
+	Env            map[string]string `yaml:"env" json:"env"`
+	TimeoutSeconds int               `yaml:"timeout_seconds" json:"timeout_seconds"`
+}
+
+// LifecycleSpec groups validate/enable/disable hooks for one extension.
+type LifecycleSpec struct {
+	Validate  []HookSpec `yaml:"validate" json:"validate"`
+	OnEnable  []HookSpec `yaml:"on_enable" json:"on_enable"`
+	OnDisable []HookSpec `yaml:"on_disable" json:"on_disable"`
+}
+
 // PluginManifest is the normalized plugin declaration.
 type PluginManifest struct {
-	Name        string   `yaml:"name" json:"name"`
-	Version     string   `yaml:"version" json:"version"`
-	Description string   `yaml:"description" json:"description"`
-	Enabled     bool     `yaml:"enabled" json:"enabled"`
-	Provides    []string `yaml:"provides" json:"provides"`
-	Tool        ToolSpec `yaml:"tool" json:"tool"`
-	Path        string   `json:"path"`
-	Hash        string   `json:"hash"`
-	StateSource string   `json:"state_source"`
+	Name        string        `yaml:"name" json:"name"`
+	Version     string        `yaml:"version" json:"version"`
+	Description string        `yaml:"description" json:"description"`
+	Enabled     bool          `yaml:"enabled" json:"enabled"`
+	Provides    []string      `yaml:"provides" json:"provides"`
+	Tool        ToolSpec      `yaml:"tool" json:"tool"`
+	Lifecycle   LifecycleSpec `yaml:"lifecycle" json:"lifecycle"`
+	Path        string        `json:"path"`
+	Hash        string        `json:"hash"`
+	StateSource string        `json:"state_source"`
 }
 
 // SkillDefinition is the normalized discovered skill record.
 type SkillDefinition struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Enabled     bool     `json:"enabled"`
-	Path        string   `json:"path"`
-	Platforms   []string `json:"platforms"`
-	Tool        ToolSpec `json:"tool"`
-	Hash        string   `json:"hash"`
-	StateSource string   `json:"state_source"`
+	Name        string        `json:"name"`
+	Description string        `json:"description"`
+	Enabled     bool          `json:"enabled"`
+	Path        string        `json:"path"`
+	Platforms   []string      `json:"platforms"`
+	Tool        ToolSpec      `json:"tool"`
+	Lifecycle   LifecycleSpec `json:"lifecycle"`
+	Hash        string        `json:"hash"`
+	StateSource string        `json:"state_source"`
 }
 
 // SkillManifest is the YAML manifest shape for a skill.
 type SkillManifest struct {
-	Name        string   `yaml:"name"`
-	Description string   `yaml:"description"`
-	Enabled     bool     `yaml:"enabled"`
-	Platforms   []string `yaml:"platforms"`
-	Tool        ToolSpec `yaml:"tool"`
+	Name        string        `yaml:"name"`
+	Description string        `yaml:"description"`
+	Enabled     bool          `yaml:"enabled"`
+	Platforms   []string      `yaml:"platforms"`
+	Tool        ToolSpec      `yaml:"tool"`
+	Lifecycle   LifecycleSpec `yaml:"lifecycle"`
 }
 
 // MCPTool is one discovered MCP tool.
@@ -99,6 +118,7 @@ type Manager struct {
 	mcpServers  []MCPServerStatus
 	stateReader func(ctx context.Context) ([]ExtensionStateRecord, error)
 	stateWriter func(ctx context.Context, kind, name string, enabled bool, hash string) error
+	hookWriter  func(ctx context.Context, record ExtensionHookRecord) error
 	registered  []string
 }
 
@@ -110,14 +130,27 @@ type ExtensionStateRecord struct {
 	Hash    string
 }
 
+// ExtensionHookRecord is the manager-level lifecycle hook result model.
+type ExtensionHookRecord struct {
+	Username string
+	Kind     string
+	Name     string
+	Phase    string
+	Hook     string
+	Status   string
+	Output   string
+	Error    string
+}
+
 // NewManager creates an extension manager with optional state persistence hooks.
 func NewManager(
 	cfg config.Config,
 	audit func(ctx context.Context, username, action, detail string) error,
 	stateReader func(ctx context.Context) ([]ExtensionStateRecord, error),
 	stateWriter func(ctx context.Context, kind, name string, enabled bool, hash string) error,
+	hookWriter func(ctx context.Context, record ExtensionHookRecord) error,
 ) *Manager {
-	return &Manager{cfg: cfg, audit: audit, stateReader: stateReader, stateWriter: stateWriter}
+	return &Manager{cfg: cfg, audit: audit, stateReader: stateReader, stateWriter: stateWriter, hookWriter: hookWriter}
 }
 
 // Discover scans plugins, skills, and MCP servers and refreshes in-memory state.
@@ -187,6 +220,18 @@ func (m *Manager) SetEnabled(ctx context.Context, username, kind, name string, e
 	if m.stateWriter == nil {
 		return fmt.Errorf("extension state storage is not configured")
 	}
+	if enabled {
+		if _, err := m.Validate(ctx, username, kind, name); err != nil {
+			return err
+		}
+		if err := m.runLifecycleHooks(ctx, username, kind, name, "on_enable"); err != nil {
+			return err
+		}
+	} else {
+		if err := m.runLifecycleHooks(ctx, username, kind, name, "on_disable"); err != nil {
+			return err
+		}
+	}
 	if err := m.stateWriter(ctx, kind, name, enabled, hash); err != nil {
 		return err
 	}
@@ -197,12 +242,166 @@ func (m *Manager) SetEnabled(ctx context.Context, username, kind, name string, e
 	return m.Discover(ctx)
 }
 
+// Validate executes the controlled validation hooks for one extension.
+func (m *Manager) Validate(ctx context.Context, username, kind, name string) (map[string]any, error) {
+	hooks, input, err := m.lifecycleHooks(kind, name, "validate")
+	if err != nil {
+		return nil, err
+	}
+	results := make([]map[string]any, 0, len(hooks))
+	for _, hook := range hooks {
+		if m.audit != nil {
+			_ = m.audit(ctx, username, "extension_validate_attempt", fmt.Sprintf("kind=%s name=%s hook=%s", kind, name, firstNonEmpty(hook.Name, hook.Command)))
+		}
+		output, err := executeCommandSpec(ctx, toolSpecFromHook(hook), input)
+		result := map[string]any{
+			"hook":   firstNonEmpty(hook.Name, hook.Command),
+			"output": output,
+		}
+		if err != nil {
+			result["error"] = err.Error()
+			m.writeHookResult(ctx, ExtensionHookRecord{
+				Username: username,
+				Kind:     kind,
+				Name:     name,
+				Phase:    "validate",
+				Hook:     firstNonEmpty(hook.Name, hook.Command),
+				Status:   "failed",
+				Output:   output,
+				Error:    err.Error(),
+			})
+			if m.audit != nil {
+				_ = m.audit(ctx, username, "extension_validate_denied", fmt.Sprintf("kind=%s name=%s err=%s", kind, name, err.Error()))
+			}
+			return map[string]any{"kind": kind, "name": name, "results": append(results, result)}, err
+		}
+		m.writeHookResult(ctx, ExtensionHookRecord{
+			Username: username,
+			Kind:     kind,
+			Name:     name,
+			Phase:    "validate",
+			Hook:     firstNonEmpty(hook.Name, hook.Command),
+			Status:   "success",
+			Output:   output,
+		})
+		results = append(results, result)
+	}
+	if m.audit != nil {
+		_ = m.audit(ctx, username, "extension_validate_success", fmt.Sprintf("kind=%s name=%s hooks=%d", kind, name, len(results)))
+	}
+	return map[string]any{"kind": kind, "name": name, "results": results}, nil
+}
+
 // Summary returns the current discovered extension state.
 func (m *Manager) Summary() Summary {
 	return Summary{
 		Plugins: append([]PluginManifest(nil), m.plugins...),
 		Skills:  append([]SkillDefinition(nil), m.skills...),
 		MCP:     append([]MCPServerStatus(nil), m.mcpServers...),
+	}
+}
+
+func (m *Manager) runLifecycleHooks(ctx context.Context, username, kind, name, phase string) error {
+	hooks, input, err := m.lifecycleHooks(kind, name, phase)
+	if err != nil {
+		return err
+	}
+	for _, hook := range hooks {
+		hookName := firstNonEmpty(hook.Name, hook.Command)
+		if m.audit != nil {
+			_ = m.audit(ctx, username, "extension_hook_attempt", fmt.Sprintf("kind=%s name=%s phase=%s hook=%s", kind, name, phase, hookName))
+		}
+		output, err := executeCommandSpec(ctx, toolSpecFromHook(hook), input)
+		if err != nil {
+			m.writeHookResult(ctx, ExtensionHookRecord{
+				Username: username,
+				Kind:     kind,
+				Name:     name,
+				Phase:    phase,
+				Hook:     hookName,
+				Status:   "failed",
+				Output:   output,
+				Error:    err.Error(),
+			})
+			if m.audit != nil {
+				_ = m.audit(ctx, username, "extension_hook_denied", fmt.Sprintf("kind=%s name=%s phase=%s err=%s", kind, name, phase, err.Error()))
+			}
+			return err
+		}
+		m.writeHookResult(ctx, ExtensionHookRecord{
+			Username: username,
+			Kind:     kind,
+			Name:     name,
+			Phase:    phase,
+			Hook:     hookName,
+			Status:   "success",
+			Output:   output,
+		})
+		if m.audit != nil {
+			_ = m.audit(ctx, username, "extension_hook_success", fmt.Sprintf("kind=%s name=%s phase=%s hook=%s bytes=%d", kind, name, phase, hookName, len(output)))
+		}
+	}
+	return nil
+}
+
+func (m *Manager) writeHookResult(ctx context.Context, record ExtensionHookRecord) {
+	if m.hookWriter == nil {
+		return
+	}
+	_ = m.hookWriter(ctx, record)
+}
+
+func (m *Manager) lifecycleHooks(kind, name, phase string) ([]HookSpec, map[string]any, error) {
+	switch kind {
+	case "plugin":
+		for _, plugin := range m.plugins {
+			if plugin.Name != name {
+				continue
+			}
+			return hooksForPhase(plugin.Lifecycle, phase), extensionHookInput(kind, plugin.Name, plugin.Path, plugin.Hash, plugin.StateSource), nil
+		}
+	case "skill":
+		for _, skill := range m.skills {
+			if skill.Name != name {
+				continue
+			}
+			return hooksForPhase(skill.Lifecycle, phase), extensionHookInput(kind, skill.Name, skill.Path, skill.Hash, skill.StateSource), nil
+		}
+	default:
+		return nil, nil, fmt.Errorf("unsupported extension kind %q", kind)
+	}
+	return nil, nil, fmt.Errorf("extension %s/%s not found", kind, name)
+}
+
+func hooksForPhase(lifecycle LifecycleSpec, phase string) []HookSpec {
+	switch phase {
+	case "validate":
+		return lifecycle.Validate
+	case "on_enable":
+		return lifecycle.OnEnable
+	case "on_disable":
+		return lifecycle.OnDisable
+	default:
+		return nil
+	}
+}
+
+func extensionHookInput(kind, name, path, hash, stateSource string) map[string]any {
+	return map[string]any{
+		"extension_kind": kind,
+		"extension_name": name,
+		"extension_path": path,
+		"extension_hash": hash,
+		"state_source":   stateSource,
+	}
+}
+
+func toolSpecFromHook(hook HookSpec) ToolSpec {
+	return ToolSpec{
+		Command:        hook.Command,
+		ArgsTemplate:   hook.ArgsTemplate,
+		Env:            hook.Env,
+		TimeoutSeconds: hook.TimeoutSeconds,
 	}
 }
 

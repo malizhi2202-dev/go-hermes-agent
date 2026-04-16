@@ -88,6 +88,7 @@ gateway:
   slack:
     enabled: false
     signing_secret_env: "SLACK_SIGNING_SECRET"
+    bot_token_env: "SLACK_BOT_TOKEN"
 
 execution:
   enabled: false
@@ -110,6 +111,21 @@ execution:
       allowed_arg_prefixes:
         - "+"
         - "--iso"
+  profiles:
+    system-health:
+      continue_on_error: false
+      require_approval: false
+      capability_token: ""
+      rollback_profile: ""
+      steps:
+        - name: "echo"
+          command: "echo"
+          args_template:
+            - "system health check"
+        - name: "date"
+          command: "date"
+          args_template:
+            - "+%Y-%m-%dT%H:%M:%SZ"
 
 extensions:
   plugins_dir: "./plugins"

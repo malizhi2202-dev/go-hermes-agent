@@ -183,6 +183,76 @@ func TestListAuditFilteredSupportsTimeAndOffset(t *testing.T) {
 	}
 }
 
+func TestListAuditFilteredSupportsWildcardAction(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	_ = st.WriteAudit(context.Background(), "alice", "system_exec_profile_attempt", "profile=health")
+	_ = st.WriteAudit(context.Background(), "alice", "system_exec_profile_success", "profile=health")
+	_ = st.WriteAudit(context.Background(), "alice", "chat", "session recorded")
+
+	records, err := st.ListAuditFiltered(context.Background(), AuditFilters{
+		Username: "alice",
+		Action:   "system_exec_profile_%",
+		Limit:    10,
+	})
+	if err != nil {
+		t.Fatalf("list audit filtered wildcard: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("expected 2 wildcard audit records, got %d", len(records))
+	}
+}
+
+func TestSummarizeMultiAgentVerifierResults(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if err := st.InsertMultiAgentTrace(ctx, MultiAgentTraceRecord{
+		Username:          "alice",
+		ParentSessionID:   1,
+		ChildSessionID:    2,
+		TaskID:            "task-1",
+		Iteration:         1,
+		Type:              "tool",
+		Tool:              "session.search",
+		Verifier:          "results field check",
+		VerificationClass: "ok",
+		Verified:          true,
+	}); err != nil {
+		t.Fatalf("insert trace: %v", err)
+	}
+	if err := st.InsertMultiAgentTrace(ctx, MultiAgentTraceRecord{
+		Username:          "alice",
+		ParentSessionID:   1,
+		ChildSessionID:    2,
+		TaskID:            "task-1",
+		Iteration:         2,
+		Type:              "tool",
+		Tool:              "session.search",
+		Verifier:          "results field check",
+		VerificationClass: "missing_results_field",
+		Verified:          false,
+	}); err != nil {
+		t.Fatalf("insert failing trace: %v", err)
+	}
+
+	summaries, err := st.SummarizeMultiAgentVerifierResults(ctx, MultiAgentTraceFilters{
+		Username: "alice",
+	})
+	if err != nil {
+		t.Fatalf("summarize verifiers: %v", err)
+	}
+	if len(summaries) != 2 {
+		t.Fatalf("expected 2 verifier summary rows, got %#v", summaries)
+	}
+}
+
 func TestExtensionStatesPersist(t *testing.T) {
 	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {

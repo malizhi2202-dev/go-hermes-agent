@@ -52,13 +52,17 @@ type Result struct {
 
 // TraceStep is one structured step in a child-agent trajectory.
 type TraceStep struct {
-	Iteration int            `json:"iteration"`
-	Type      string         `json:"type"`
-	Tool      string         `json:"tool,omitempty"`
-	Input     map[string]any `json:"input,omitempty"`
-	Output    map[string]any `json:"output,omitempty"`
-	Error     string         `json:"error,omitempty"`
-	Note      string         `json:"note,omitempty"`
+	Iteration         int            `json:"iteration"`
+	Type              string         `json:"type"`
+	Tool              string         `json:"tool,omitempty"`
+	Input             map[string]any `json:"input,omitempty"`
+	Output            map[string]any `json:"output,omitempty"`
+	Snapshot          map[string]any `json:"snapshot,omitempty"`
+	Verified          bool           `json:"verified,omitempty"`
+	Verifier          string         `json:"verifier,omitempty"`
+	VerificationClass string         `json:"verification_class,omitempty"`
+	Error             string         `json:"error,omitempty"`
+	Note              string         `json:"note,omitempty"`
 }
 
 // Aggregate summarizes the outcome of an entire multi-agent plan.

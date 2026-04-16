@@ -81,7 +81,7 @@ tool:
 	cfg := config.Default()
 	cfg.Extensions.PluginsDir = pluginsDir
 	cfg.Extensions.SkillsDirs = []string{skillsDir}
-	manager := NewManager(cfg, nil, nil, nil)
+	manager := NewManager(cfg, nil, nil, nil, nil)
 	if err := manager.Discover(context.Background()); err != nil {
 		t.Fatalf("discover extensions: %v", err)
 	}
@@ -193,7 +193,7 @@ while True:
 			TimeoutSeconds: 5,
 		},
 	}
-	manager := NewManager(cfg, nil, nil, nil)
+	manager := NewManager(cfg, nil, nil, nil, nil)
 	if err := manager.Discover(context.Background()); err != nil {
 		t.Fatalf("discover extensions: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestMCPHTTPServerDiscoveryAndExecution(t *testing.T) {
 			TimeoutSeconds: 5,
 		},
 	}
-	manager := NewManager(cfg, nil, nil, nil)
+	manager := NewManager(cfg, nil, nil, nil, nil)
 	if err := manager.Discover(context.Background()); err != nil {
 		t.Fatalf("discover extensions: %v", err)
 	}
@@ -357,7 +357,7 @@ tool:
 	}, func(_ context.Context, kind, name string, enabled bool, hash string) error {
 		persisted = []ExtensionStateRecord{{Kind: kind, Name: name, Enabled: enabled, Hash: hash}}
 		return nil
-	})
+	}, nil)
 	if err := manager.Discover(context.Background()); err != nil {
 		t.Fatalf("discover: %v", err)
 	}
@@ -376,5 +376,105 @@ tool:
 	}
 	if _, err := registry.Execute(context.Background(), "plugin.echoer", map[string]any{"username": "admin", "message": "alpha"}); err == nil {
 		t.Fatal("expected disabled tool to be unregistered")
+	}
+}
+
+func TestExtensionLifecycleValidateAndStateHooks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses unix executable permissions")
+	}
+	root := t.TempDir()
+	pluginsDir := filepath.Join(root, "plugins")
+	if err := os.MkdirAll(filepath.Join(pluginsDir, "echoer"), 0o755); err != nil {
+		t.Fatalf("mkdir plugin: %v", err)
+	}
+	toolScript := filepath.Join(root, "plugin-tool.sh")
+	validateScript := filepath.Join(root, "validate.sh")
+	enableScript := filepath.Join(root, "enable.sh")
+	disableScript := filepath.Join(root, "disable.sh")
+	if err := os.WriteFile(toolScript, []byte("#!/bin/sh\nprintf 'plugin:%s' \"$1\"\n"), 0o755); err != nil {
+		t.Fatalf("write tool script: %v", err)
+	}
+	if err := os.WriteFile(validateScript, []byte("#!/bin/sh\nprintf '%s' \"$1\" > \"$2\"\n"), 0o755); err != nil {
+		t.Fatalf("write validate script: %v", err)
+	}
+	if err := os.WriteFile(enableScript, []byte("#!/bin/sh\nprintf 'enabled:%s' \"$1\" > \"$2\"\n"), 0o755); err != nil {
+		t.Fatalf("write enable script: %v", err)
+	}
+	if err := os.WriteFile(disableScript, []byte("#!/bin/sh\nprintf 'disabled:%s' \"$1\" > \"$2\"\n"), 0o755); err != nil {
+		t.Fatalf("write disable script: %v", err)
+	}
+	validateOut := filepath.Join(root, "validate.out")
+	enableOut := filepath.Join(root, "enable.out")
+	disableOut := filepath.Join(root, "disable.out")
+	manifest := `
+name: echoer
+enabled: true
+tool:
+  name: plugin.echoer
+  command: ` + toolScript + `
+  args_template:
+    - "{{message}}"
+  input_keys:
+    - message
+lifecycle:
+  validate:
+    - name: manifest-check
+      command: ` + validateScript + `
+      args_template:
+        - "{{extension_name}}"
+        - ` + validateOut + `
+  on_enable:
+    - name: enable-hook
+      command: ` + enableScript + `
+      args_template:
+        - "{{extension_name}}"
+        - ` + enableOut + `
+  on_disable:
+    - name: disable-hook
+      command: ` + disableScript + `
+      args_template:
+        - "{{extension_name}}"
+        - ` + disableOut + `
+`
+	if err := os.WriteFile(filepath.Join(pluginsDir, "echoer", "plugin.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	var persisted []ExtensionStateRecord
+	manager := NewManager(config.Config{
+		Extensions: config.ExtensionConfig{PluginsDir: pluginsDir},
+	}, nil, func(context.Context) ([]ExtensionStateRecord, error) {
+		return persisted, nil
+	}, func(_ context.Context, kind, name string, enabled bool, hash string) error {
+		persisted = []ExtensionStateRecord{{Kind: kind, Name: name, Enabled: enabled, Hash: hash}}
+		return nil
+	}, nil)
+	if err := manager.Discover(context.Background()); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	result, err := manager.Validate(context.Background(), "admin", "plugin", "echoer")
+	if err != nil {
+		t.Fatalf("validate extension: %v", err)
+	}
+	if result["results"] == nil {
+		t.Fatalf("expected validation results: %#v", result)
+	}
+	raw, err := os.ReadFile(validateOut)
+	if err != nil || strings.TrimSpace(string(raw)) != "echoer" {
+		t.Fatalf("unexpected validate hook output: %q err=%v", string(raw), err)
+	}
+	if err := manager.SetEnabled(context.Background(), "admin", "plugin", "echoer", false); err != nil {
+		t.Fatalf("disable extension: %v", err)
+	}
+	raw, err = os.ReadFile(disableOut)
+	if err != nil || strings.TrimSpace(string(raw)) != "disabled:echoer" {
+		t.Fatalf("unexpected disable hook output: %q err=%v", string(raw), err)
+	}
+	if err := manager.SetEnabled(context.Background(), "admin", "plugin", "echoer", true); err != nil {
+		t.Fatalf("enable extension: %v", err)
+	}
+	raw, err = os.ReadFile(enableOut)
+	if err != nil || strings.TrimSpace(string(raw)) != "enabled:echoer" {
+		t.Fatalf("unexpected enable hook output: %q err=%v", string(raw), err)
 	}
 }
