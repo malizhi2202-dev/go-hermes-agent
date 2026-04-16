@@ -181,6 +181,7 @@ go mod tidy
 go build -o bin/hermesd ./cmd/hermesd
 go build -o bin/hermesctl ./cmd/hermesctl
 ./bin/hermesctl init-admin --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!'
+./bin/hermesctl chat --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!'
 ./bin/hermesd --config ./configs/config.example.yaml
 ```
 
@@ -189,6 +190,7 @@ go build -o bin/hermesctl ./cmd/hermesctl
 ```bash
 ./bin/hermesctl init-admin --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!'
 ./bin/hermesctl login --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!'
+./bin/hermesctl chat --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!'
 ./bin/hermesd --config ./configs/config.example.yaml
 ```
 

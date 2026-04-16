@@ -2,3 +2,4 @@
 .vscode
 bin
 data
+configs/config.example.yaml

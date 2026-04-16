@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -50,6 +51,7 @@ func TestToolsEndpointRequiresAuthAndReturnsTools(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &tools); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
+	fmt.Println(tools)
 	if len(tools) == 0 {
 		t.Fatal("expected non-empty tools response")
 	}

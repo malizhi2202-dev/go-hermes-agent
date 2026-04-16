@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"sort"
@@ -34,6 +36,8 @@ func main() {
 		runInitAdmin(os.Args[2:])
 	case "login":
 		runLogin(os.Args[2:])
+	case "chat":
+		runChat(os.Args[2:])
 	default:
 		usage()
 		os.Exit(1)
@@ -49,6 +53,8 @@ func usage() {
 	fmt.Println("  hermesctl switch-model --config <file> --model <id> --base-url <url> [--provider <name>] [--api-key-env <ENV>] [--local]")
 	fmt.Println("  hermesctl init-admin --config <file> --username <user> --password <pass>")
 	fmt.Println("  hermesctl login --config <file> --username <user> --password <pass>")
+	fmt.Println("  hermesctl chat --config <file> --username <user> --password <pass> [--prompt <text>]")
+	fmt.Println("  hermesctl chat --config <file> --token <jwt> [--prompt <text>]")
 }
 
 func runModels(args []string) {
@@ -205,6 +211,106 @@ func runLogin(args []string) {
 		log.Fatalf("login failed: %v", err)
 	}
 	fmt.Println(token)
+}
+
+func runChat(args []string) {
+	fs := flag.NewFlagSet("chat", flag.ExitOnError)
+	configPath := fs.String("config", "./configs/config.example.yaml", "config file")
+	username := fs.String("username", "", "username")
+	password := fs.String("password", "", "password")
+	token := fs.String("token", "", "jwt token")
+	prompt := fs.String("prompt", "", "single prompt to send")
+	_ = fs.Parse(args)
+
+	cfg, application := mustApp(*configPath)
+	defer application.Close()
+
+	chatUser, err := authenticateChatUser(context.Background(), application, strings.TrimSpace(*username), *password, strings.TrimSpace(*token))
+	if err != nil {
+		log.Fatalf("chat auth: %v", err)
+	}
+
+	if text := strings.TrimSpace(*prompt); text != "" {
+		reply, err := application.Chat(context.Background(), chatUser, text)
+		if err != nil {
+			log.Fatalf("chat failed: %v", err)
+		}
+		fmt.Println(reply)
+		return
+	}
+
+	if piped := strings.TrimSpace(readAllFromStdin()); piped != "" {
+		reply, err := application.Chat(context.Background(), chatUser, piped)
+		if err != nil {
+			log.Fatalf("chat failed: %v", err)
+		}
+		fmt.Println(reply)
+		return
+	}
+
+	current := cfg.ResolvedLLM()
+	fmt.Printf("chat session started as %q with model %q\n", chatUser, current.Model)
+	fmt.Println("type /exit or /quit to leave")
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print("you> ")
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			log.Fatalf("read prompt: %v", err)
+		}
+		text := strings.TrimSpace(line)
+		if text == "" {
+			if err == io.EOF {
+				fmt.Println("")
+				return
+			}
+			continue
+		}
+		if text == "/exit" || text == "/quit" {
+			return
+		}
+		reply, chatErr := application.Chat(context.Background(), chatUser, text)
+		if chatErr != nil {
+			fmt.Printf("assistant> error: %v\n", chatErr)
+		} else {
+			fmt.Printf("assistant> %s\n", reply)
+		}
+		if err == io.EOF {
+			return
+		}
+	}
+}
+
+func authenticateChatUser(ctx context.Context, application *app.App, username, password, token string) (string, error) {
+	if token != "" {
+		claims, err := application.Auth.ParseToken(token)
+		if err != nil {
+			return "", err
+		}
+		return claims.Username, nil
+	}
+	if username == "" || password == "" {
+		return "", fmt.Errorf("token or username/password is required")
+	}
+	if _, err := application.Auth.Login(ctx, username, password); err != nil {
+		return "", err
+	}
+	return username, nil
+}
+
+func readAllFromStdin() string {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return ""
+	}
+	if info.Mode()&os.ModeCharDevice != 0 {
+		return ""
+	}
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func mustApp(configPath string) (config.Config, *app.App) {
