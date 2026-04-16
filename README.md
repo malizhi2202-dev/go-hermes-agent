@@ -104,21 +104,18 @@
 ## 一键安装
 
 ```bash
-cd go
 bash scripts/install.sh
 ```
 
 一键卸载：
 
 ```bash
-cd go
 bash scripts/uninstall.sh
 ```
 
 彻底卸载（连配置和数据一起删）：
 
 ```bash
-cd go
 bash scripts/uninstall.sh --purge
 ```
 
@@ -180,7 +177,6 @@ curl -H "Authorization: Bearer <token>" \
 ## 快速开始
 
 ```bash
-cd go
 go mod tidy
 go build -o bin/hermesd ./cmd/hermesd
 go build -o bin/hermesctl ./cmd/hermesctl
