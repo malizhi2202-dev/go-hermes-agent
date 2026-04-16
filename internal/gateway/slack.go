@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"hermes-agent/go/internal/app"
+	"go-hermes-agent/internal/app"
 )
 
 // SlackAdapter handles Slack slash command ingress with signature verification.

@@ -251,4 +251,4 @@ go build -o bin/hermesctl ./cmd/hermesctl
 
 ## Go 文档导航
 
-- [Go Hermes-Agent 完整总文档](/home/malizhi/project/hermes-agent/go/docs/delivery/go-complete-architecture-and-optimization.md)
+- [Go Hermes-Agent 完整总文档](./docs/delivery/go-complete-architecture-and-optimization.md)

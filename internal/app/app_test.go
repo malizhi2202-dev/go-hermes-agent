@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"hermes-agent/go/internal/config"
-	"hermes-agent/go/internal/multiagent"
-	"hermes-agent/go/internal/store"
+	"go-hermes-agent/internal/config"
+	"go-hermes-agent/internal/multiagent"
+	"go-hermes-agent/internal/store"
 )
 
 func TestRunMultiAgentPlanFallsBackToStubWithoutAPIKey(t *testing.T) {

@@ -8,9 +8,9 @@ import (
 	"os"
 	"time"
 
-	"hermes-agent/go/internal/config"
-	"hermes-agent/go/internal/security"
-	"hermes-agent/go/internal/store"
+	"go-hermes-agent/internal/config"
+	"go-hermes-agent/internal/security"
+	"go-hermes-agent/internal/store"
 )
 
 // Service manages local-user authentication and JWT issuance.

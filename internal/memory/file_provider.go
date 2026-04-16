@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 
-	"hermes-agent/go/internal/config"
+	"go-hermes-agent/internal/config"
 )
 
 const entryDelimiter = "\n§\n"

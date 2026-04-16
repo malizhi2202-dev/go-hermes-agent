@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"hermes-agent/go/internal/app"
-	"hermes-agent/go/internal/config"
-	"hermes-agent/go/internal/store"
+	"go-hermes-agent/internal/app"
+	"go-hermes-agent/internal/config"
+	"go-hermes-agent/internal/store"
 )
 
 func TestToolsEndpointRequiresAuthAndReturnsTools(t *testing.T) {

@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"hermes-agent/go/internal/config"
-	"hermes-agent/go/internal/tools"
+	"go-hermes-agent/internal/config"
+	"go-hermes-agent/internal/tools"
 )
 
 type mcpRequest struct {

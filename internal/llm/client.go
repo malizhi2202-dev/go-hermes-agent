@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"hermes-agent/go/internal/config"
+	"go-hermes-agent/internal/config"
 )
 
 // Client is a minimal OpenAI-compatible chat completions client.

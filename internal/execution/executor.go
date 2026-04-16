@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"hermes-agent/go/internal/config"
+	"go-hermes-agent/internal/config"
 )
 
 // Executor runs a tightly constrained allowlisted command.

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"hermes-agent/go/internal/app"
+	"go-hermes-agent/internal/app"
 )
 
 // TelegramAdapter handles Telegram webhook ingress and reply delivery.

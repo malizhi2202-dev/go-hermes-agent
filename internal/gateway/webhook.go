@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"hermes-agent/go/internal/app"
+	"go-hermes-agent/internal/app"
 )
 
 // WebhookAdapter handles generic authenticated inbound webhook messages.

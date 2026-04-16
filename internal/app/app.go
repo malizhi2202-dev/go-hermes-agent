@@ -9,17 +9,17 @@ import (
 	"sync"
 	"time"
 
-	"hermes-agent/go/internal/auth"
-	"hermes-agent/go/internal/config"
-	"hermes-agent/go/internal/contextengine"
-	"hermes-agent/go/internal/execution"
-	"hermes-agent/go/internal/extensions"
-	"hermes-agent/go/internal/llm"
-	"hermes-agent/go/internal/memory"
-	"hermes-agent/go/internal/models"
-	"hermes-agent/go/internal/multiagent"
-	"hermes-agent/go/internal/store"
-	"hermes-agent/go/internal/tools"
+	"go-hermes-agent/internal/auth"
+	"go-hermes-agent/internal/config"
+	"go-hermes-agent/internal/contextengine"
+	"go-hermes-agent/internal/execution"
+	"go-hermes-agent/internal/extensions"
+	"go-hermes-agent/internal/llm"
+	"go-hermes-agent/internal/memory"
+	"go-hermes-agent/internal/models"
+	"go-hermes-agent/internal/multiagent"
+	"go-hermes-agent/internal/store"
+	"go-hermes-agent/internal/tools"
 )
 
 type App struct {

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"hermes-agent/go/internal/config"
+	"go-hermes-agent/internal/config"
 )
 
 // Catalog stores model profile aliases and discovery helpers.

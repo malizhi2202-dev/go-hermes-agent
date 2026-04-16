@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"hermes-agent/go/internal/app"
-	"hermes-agent/go/internal/gateway"
-	"hermes-agent/go/internal/multiagent"
-	"hermes-agent/go/internal/store"
+	"go-hermes-agent/internal/app"
+	"go-hermes-agent/internal/gateway"
+	"go-hermes-agent/internal/multiagent"
+	"go-hermes-agent/internal/store"
 )
 
 // Server exposes the authenticated HTTP API and gateway webhook routes.

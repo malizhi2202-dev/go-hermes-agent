@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"hermes-agent/go/internal/tools"
+	"go-hermes-agent/internal/tools"
 )
 
 var placeholderPattern = regexp.MustCompile(`^\{\{([a-zA-Z0-9_\-]+)\}\}$`)

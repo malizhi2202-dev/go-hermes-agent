@@ -13,8 +13,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"hermes-agent/go/internal/config"
-	"hermes-agent/go/internal/tools"
+	"go-hermes-agent/internal/config"
+	"go-hermes-agent/internal/tools"
 )
 
 // ToolSpec describes one command-backed extension tool.
