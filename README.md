@@ -1,8 +1,7 @@
 # Hermes Agent Go
 
-`go/` 是对原 Python Hermes Agent 的安全化、增量式 Go 迁移工作区。
 
-当前版本不是对 Python 项目的逐文件机械翻译，而是先落地一个更安全、可安装、可审计、便于继续演进的主干：
+落地一个更安全、可安装、可审计、便于继续演进的主干：
 
 - 标准 Go 目录结构：`cmd/`、`internal/`、`configs/`、`docs/`、`scripts/`
 - 本地账号与安全登录
@@ -92,7 +91,7 @@
 - `/v1/audit/execution/profiles` 现在提供 `exec_profile` 专门的记录、action 聚合和 profile 聚合视图
 - 这意味着 Go 版已经有“真实 child runtime 第一版”，但还没开放递归子代理和高风险 delegated runtime
 
-已明确不直接迁移的高风险能力：
+已明确不实现的高风险能力：
 
 - 任意终端命令执行
 - 动态 Python 脚本执行
@@ -100,7 +99,7 @@
 - 自动浏览器执行链
 - 弱校验的外部技能脚本直跑
 
-这些能力如果后续确有必要迁移，需要先经过白名单、沙箱、审批、审计等安全收口。
+这些能力如果后续确有必要实现，需要先经过白名单、沙箱、审批、审计等安全收口。
 
 ## 一键安装
 
@@ -232,9 +231,9 @@ go build -o bin/hermesctl ./cmd/hermesctl
 - `internal/app`：应用装配
 - `internal/store/README.md`：SQLite 状态与轨迹持久化说明
 - `internal/version/README.md`：版本说明
-- `docs/`：Python 梳理、迁移映射、安全清理说明
 
-## 当前迁移定位
+
+## 当前实现定位
 
 当前 Go 版本属于“安全主干版”。它优先承接：
 
@@ -253,4 +252,3 @@ go build -o bin/hermesctl ./cmd/hermesctl
 ## Go 文档导航
 
 - [Go Hermes-Agent 完整总文档](/home/malizhi/project/hermes-agent/go/docs/delivery/go-complete-architecture-and-optimization.md)
-- [Go 迁移差距清单](/home/malizhi/project/hermes-agent/go/docs/migration/go-gap-checklist.md)
