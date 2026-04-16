@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"go-hermes-agent/internal/config"
-	"go-hermes-agent/internal/llm"
+	"hermes-agent/go/internal/config"
+	"hermes-agent/go/internal/llm"
 )
 
 func TestCompressorCompressesOlderMessagesAndKeepsTail(t *testing.T) {

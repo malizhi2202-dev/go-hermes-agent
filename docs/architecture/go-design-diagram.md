@@ -198,11 +198,11 @@ flowchart TD
 - 结构清晰，入口统一
 - 安全边界明确
 - 状态与审计集中
-- 容易继续向 Slack、更多 MCP transport、更多 gateway 扩展
+- 容易继续向更多 Slack 能力、更多 MCP transport、更多 gateway 扩展
 
 ## 当前设计的限制
 
 - 还不是完整的多轮 agent orchestration
-- MCP 目前只实现了 `stdio`
+- MCP 目前已支持 `stdio` 与受控 `http`，但还没有更完整的 streamable HTTP / 长连接 transport
 - plugin / skill 目前是受控命令模板，不是完整生命周期插件系统
 - 复杂动态执行链仍然保守收口

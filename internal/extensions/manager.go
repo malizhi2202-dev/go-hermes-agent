@@ -13,10 +13,11 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"go-hermes-agent/internal/config"
-	"go-hermes-agent/internal/tools"
+	"hermes-agent/go/internal/config"
+	"hermes-agent/go/internal/tools"
 )
 
+// ToolSpec describes one command-backed extension tool.
 type ToolSpec struct {
 	Name           string            `yaml:"name" json:"name"`
 	Description    string            `yaml:"description" json:"description"`
@@ -27,6 +28,7 @@ type ToolSpec struct {
 	InputKeys      []string          `yaml:"input_keys" json:"input_keys"`
 }
 
+// PluginManifest is the normalized plugin declaration.
 type PluginManifest struct {
 	Name        string   `yaml:"name" json:"name"`
 	Version     string   `yaml:"version" json:"version"`
@@ -39,6 +41,7 @@ type PluginManifest struct {
 	StateSource string   `json:"state_source"`
 }
 
+// SkillDefinition is the normalized discovered skill record.
 type SkillDefinition struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
@@ -50,6 +53,7 @@ type SkillDefinition struct {
 	StateSource string   `json:"state_source"`
 }
 
+// SkillManifest is the YAML manifest shape for a skill.
 type SkillManifest struct {
 	Name        string   `yaml:"name"`
 	Description string   `yaml:"description"`
@@ -58,14 +62,18 @@ type SkillManifest struct {
 	Tool        ToolSpec `yaml:"tool"`
 }
 
+// MCPTool is one discovered MCP tool.
 type MCPTool struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
 	InputSchema map[string]any `json:"input_schema"`
 }
 
+// MCPServerStatus reports discovery state for one MCP server.
 type MCPServerStatus struct {
 	Name        string    `json:"name"`
+	Transport   string    `json:"transport"`
+	URL         string    `json:"url,omitempty"`
 	Enabled     bool      `json:"enabled"`
 	Command     string    `json:"command"`
 	Args        []string  `json:"args"`
@@ -75,12 +83,14 @@ type MCPServerStatus struct {
 	RefreshedAt time.Time `json:"refreshed_at"`
 }
 
+// Summary is the top-level extension discovery summary.
 type Summary struct {
 	Plugins []PluginManifest  `json:"plugins"`
 	Skills  []SkillDefinition `json:"skills"`
 	MCP     []MCPServerStatus `json:"mcp"`
 }
 
+// Manager discovers, persists, and registers extensions.
 type Manager struct {
 	cfg         config.Config
 	audit       func(ctx context.Context, username, action, detail string) error
@@ -92,6 +102,7 @@ type Manager struct {
 	registered  []string
 }
 
+// ExtensionStateRecord is the persisted enable/disable state model.
 type ExtensionStateRecord struct {
 	Kind    string
 	Name    string
@@ -99,6 +110,7 @@ type ExtensionStateRecord struct {
 	Hash    string
 }
 
+// NewManager creates an extension manager with optional state persistence hooks.
 func NewManager(
 	cfg config.Config,
 	audit func(ctx context.Context, username, action, detail string) error,
@@ -108,6 +120,7 @@ func NewManager(
 	return &Manager{cfg: cfg, audit: audit, stateReader: stateReader, stateWriter: stateWriter}
 }
 
+// Discover scans plugins, skills, and MCP servers and refreshes in-memory state.
 func (m *Manager) Discover(ctx context.Context) error {
 	plugins, err := discoverPlugins(m.cfg.Extensions.PluginsDir)
 	if err != nil {
@@ -127,6 +140,7 @@ func (m *Manager) Discover(ctx context.Context) error {
 	return nil
 }
 
+// Register refreshes all enabled extension tools in the registry.
 func (m *Manager) Register(registry *tools.Registry) error {
 	registry.Unregister(m.registered...)
 	m.registered = nil
@@ -162,6 +176,7 @@ func (m *Manager) Register(registry *tools.Registry) error {
 	return nil
 }
 
+// SetEnabled persists extension state and refreshes discovery.
 func (m *Manager) SetEnabled(ctx context.Context, username, kind, name string, enabled bool) error {
 	kind = strings.TrimSpace(kind)
 	name = strings.TrimSpace(name)
@@ -182,6 +197,7 @@ func (m *Manager) SetEnabled(ctx context.Context, username, kind, name string, e
 	return m.Discover(ctx)
 }
 
+// Summary returns the current discovered extension state.
 func (m *Manager) Summary() Summary {
 	return Summary{
 		Plugins: append([]PluginManifest(nil), m.plugins...),
@@ -410,6 +426,8 @@ func discoverMCPServers(ctx context.Context, servers map[string]config.MCPServer
 		cfg := servers[name]
 		status := MCPServerStatus{
 			Name:        name,
+			Transport:   normalizedMCPTransport(cfg),
+			URL:         cfg.URL,
 			Enabled:     cfg.Enabled,
 			Command:     cfg.Command,
 			Args:        append([]string(nil), cfg.Args...),

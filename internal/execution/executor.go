@@ -7,9 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"go-hermes-agent/internal/config"
+	"hermes-agent/go/internal/config"
 )
 
+// Executor runs a tightly constrained allowlisted command.
 type Executor struct {
 	enabled         bool
 	timeout         time.Duration
@@ -20,6 +21,7 @@ type Executor struct {
 	commandRules    map[string]config.CommandRule
 }
 
+// NewExecutor builds an executor from execution config.
 func NewExecutor(cfg config.ExecutionConfig) *Executor {
 	allowed := make(map[string]struct{}, len(cfg.AllowedCommands))
 	for _, command := range cfg.AllowedCommands {
@@ -39,6 +41,7 @@ func NewExecutor(cfg config.ExecutionConfig) *Executor {
 	}
 }
 
+// Execute validates a command against policy and runs it without a shell.
 func (e *Executor) Execute(ctx context.Context, command string, args []string) (string, error) {
 	if !e.enabled {
 		return "", fmt.Errorf("dynamic execution is disabled")

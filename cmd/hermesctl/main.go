@@ -9,10 +9,10 @@ import (
 	"sort"
 	"strings"
 
-	"go-hermes-agent/internal/app"
-	"go-hermes-agent/internal/config"
-	"go-hermes-agent/internal/models"
-	"go-hermes-agent/internal/version"
+	"hermes-agent/go/internal/app"
+	"hermes-agent/go/internal/config"
+	"hermes-agent/go/internal/models"
+	"hermes-agent/go/internal/version"
 )
 
 func main() {

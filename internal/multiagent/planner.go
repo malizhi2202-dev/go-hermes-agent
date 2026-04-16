@@ -2,14 +2,17 @@ package multiagent
 
 import "strings"
 
+// Planner converts a task list into a validated multi-agent plan.
 type Planner struct {
 	policy Policy
 }
 
+// NewPlanner creates a planner with the supplied policy.
 func NewPlanner(policy Policy) *Planner {
 	return &Planner{policy: policy}
 }
 
+// Build creates a plan and lets the policy validate it.
 func (p *Planner) Build(objective string, tasks []Task) (Plan, error) {
 	mode := TaskModeSequential
 	if canRunParallel(tasks) {

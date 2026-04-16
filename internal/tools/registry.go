@@ -6,8 +6,10 @@ import (
 	"sort"
 )
 
+// Handler executes one registered tool call.
 type Handler func(ctx context.Context, input map[string]any) (map[string]any, error)
 
+// Tool is one registered safe tool definition.
 type Tool struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
@@ -15,14 +17,17 @@ type Tool struct {
 	Handler     Handler  `json:"-"`
 }
 
+// Registry holds the process-local tool allowlist.
 type Registry struct {
 	tools map[string]Tool
 }
 
+// New creates an empty tool registry.
 func New() *Registry {
 	return &Registry{tools: make(map[string]Tool)}
 }
 
+// Register adds or replaces one tool definition.
 func (r *Registry) Register(tool Tool) error {
 	if tool.Name == "" {
 		return fmt.Errorf("tool name is required")
@@ -34,12 +39,14 @@ func (r *Registry) Register(tool Tool) error {
 	return nil
 }
 
+// Unregister removes tools by name.
 func (r *Registry) Unregister(names ...string) {
 	for _, name := range names {
 		delete(r.tools, name)
 	}
 }
 
+// List returns registered tools in stable name order.
 func (r *Registry) List() []Tool {
 	names := make([]string, 0, len(r.tools))
 	for name := range r.tools {
@@ -53,11 +60,13 @@ func (r *Registry) List() []Tool {
 	return result
 }
 
+// Get returns a registered tool by name.
 func (r *Registry) Get(name string) (Tool, bool) {
 	tool, ok := r.tools[name]
 	return tool, ok
 }
 
+// Execute dispatches a registered tool handler.
 func (r *Registry) Execute(ctx context.Context, name string, input map[string]any) (map[string]any, error) {
 	tool, ok := r.tools[name]
 	if !ok {

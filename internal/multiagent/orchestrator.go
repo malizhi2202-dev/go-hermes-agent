@@ -2,14 +2,17 @@ package multiagent
 
 import "context"
 
+// Runner executes one delegated task and returns its result.
 type Runner func(ctx context.Context, task Task) Result
 
+// Orchestrator owns planning, validation, execution ordering, and aggregation.
 type Orchestrator struct {
 	policy     Policy
 	planner    *Planner
 	aggregator *Aggregator
 }
 
+// NewOrchestrator creates an orchestrator with default planner and aggregator helpers.
 func NewOrchestrator(policy Policy) *Orchestrator {
 	return &Orchestrator{
 		policy:     policy,
@@ -18,10 +21,12 @@ func NewOrchestrator(policy Policy) *Orchestrator {
 	}
 }
 
+// BuildPlan validates and returns a multi-agent execution plan.
 func (o *Orchestrator) BuildPlan(objective string, tasks []Task) (Plan, error) {
 	return o.planner.Build(objective, tasks)
 }
 
+// Run executes the supplied plan using the provided task runner.
 func (o *Orchestrator) Run(ctx context.Context, plan Plan, runner Runner) ([]Result, Aggregate, error) {
 	if err := o.policy.Validate(plan); err != nil {
 		return nil, Aggregate{}, err

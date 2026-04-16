@@ -297,3 +297,78 @@ func TestListRecentMessagesBySession(t *testing.T) {
 		t.Fatalf("unexpected messages: %#v", messages)
 	}
 }
+
+func TestMultiAgentTracePersistsAndLists(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.InsertMultiAgentTrace(context.Background(), MultiAgentTraceRecord{
+		Username:        "alice",
+		ParentSessionID: 1,
+		ChildSessionID:  2,
+		TaskID:          "gateway",
+		Iteration:       1,
+		Type:            "tool",
+		Tool:            "session.search",
+		InputJSON:       `{"query":"alpha"}`,
+		OutputJSON:      `{"results":[]}`,
+		Note:            "first tool call",
+	}); err != nil {
+		t.Fatalf("insert trace: %v", err)
+	}
+	records, err := st.ListMultiAgentTraces(context.Background(), MultiAgentTraceFilters{
+		Username:       "alice",
+		ChildSessionID: 2,
+	})
+	if err != nil {
+		t.Fatalf("list traces: %v", err)
+	}
+	if len(records) != 1 || records[0].TaskID != "gateway" || records[0].Tool != "session.search" {
+		t.Fatalf("unexpected trace records: %#v", records)
+	}
+}
+
+func TestMultiAgentTraceSummariesAndFailures(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	rows := []MultiAgentTraceRecord{
+		{Username: "alice", ParentSessionID: 1, ChildSessionID: 2, TaskID: "t1", Iteration: 1, Type: "tool", Tool: "session.search", OutputJSON: `{"ok":true}`},
+		{Username: "alice", ParentSessionID: 1, ChildSessionID: 2, TaskID: "t1", Iteration: 2, Type: "tool", Tool: "session.search", Error: "boom"},
+		{Username: "alice", ParentSessionID: 1, ChildSessionID: 2, TaskID: "t1", Iteration: 3, Type: "final", Note: "done"},
+	}
+	for _, row := range rows {
+		if err := st.InsertMultiAgentTrace(ctx, row); err != nil {
+			t.Fatalf("insert trace: %v", err)
+		}
+	}
+	failures, err := st.ListMultiAgentTraceFailures(ctx, MultiAgentTraceFilters{Username: "alice"})
+	if err != nil {
+		t.Fatalf("list failures: %v", err)
+	}
+	if len(failures) != 1 || failures[0].Tool != "session.search" {
+		t.Fatalf("unexpected failures: %#v", failures)
+	}
+	summary, err := st.SummarizeMultiAgentTraces(ctx, MultiAgentTraceFilters{Username: "alice"})
+	if err != nil {
+		t.Fatalf("summarize traces: %v", err)
+	}
+	if len(summary) == 0 {
+		t.Fatal("expected non-empty summary")
+	}
+	if summary[0].Tool != "session.search" || summary[0].Failures != 1 {
+		t.Fatalf("unexpected summary: %#v", summary)
+	}
+	hotspots, err := st.ListMultiAgentTraceHotspots(ctx, MultiAgentTraceFilters{Username: "alice", Limit: 10})
+	if err != nil {
+		t.Fatalf("trace hotspots: %v", err)
+	}
+	if len(hotspots) != 1 || hotspots[0].ChildSessionID != 2 || hotspots[0].Failures != 1 {
+		t.Fatalf("unexpected hotspots: %#v", hotspots)
+	}
+}

@@ -21,6 +21,12 @@
 - 多 Agent 的 plan / policy / orchestrator / aggregate
 - `POST /v1/multiagent/plan`
 - `POST /v1/multiagent/run`
+- `GET /v1/multiagent/traces`
+- `GET /v1/multiagent/traces/summary`
+- `GET /v1/multiagent/traces/failures`
+- `GET /v1/multiagent/traces/hotspots`
+- `GET /v1/multiagent/replay`
+- `POST /v1/multiagent/resume`
 
 ## 已有骨架但还没完全等价
 
@@ -44,13 +50,17 @@
   - blocked tools 校验
   - 写入范围冲突校验
   - API plan/run 入口
-  - child runtime 第一版：优先走 LLM，总失败时回退 stub
+- parent / child session 串联
+- child trace 持久化
+- replay / resume
+- trace summary / failures / hotspots
+- child runtime 第一版：优先走 LLM，总失败时回退 stub
+- child runtime 第一版已支持受控多轮循环、安全工具白名单执行、原生 tool-calling 优先和 seed history 恢复
 - 还缺：
-  - 真正独立的 child agent 会话
-  - 每个 child 的独立 history/context window
-  - tool 级权限注入与真实 delegated tools
-  - 父子 agent 结果回注主会话
-  - 递归深度控制与更细粒度审计
+- 更完整的 child loop state 恢复，不只恢复最后成功 tool state
+- 更完整的 tool 级权限注入与更多真实 delegated tools
+- 更细粒度的父子 agent 结构化结果回注主会话
+- 递归深度控制与更细粒度审计
 
 ### 记忆
 
@@ -93,7 +103,7 @@
 
 ## 建议的后续迁移顺序
 
-1. 把多 Agent child runtime 从“LLM / stub”升级成真正独立 child session
-2. 给 child runtime 加受限工具注入
-3. 把 child 结果回注父会话链
-4. 再继续 gateway 平台族和高动态能力
+1. 把多 Agent 恢复链从“恢复最后成功 tool state”升级成更完整的 child loop state 恢复
+2. 继续补 delegated tools 与结构化结果回注
+3. 再继续 gateway 平台族
+4. 最后处理高动态能力

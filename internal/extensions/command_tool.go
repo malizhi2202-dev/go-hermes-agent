@@ -8,11 +8,12 @@ import (
 	"strings"
 	"time"
 
-	"go-hermes-agent/internal/tools"
+	"hermes-agent/go/internal/tools"
 )
 
 var placeholderPattern = regexp.MustCompile(`^\{\{([a-zA-Z0-9_\-]+)\}\}$`)
 
+// registerCommandTool registers a command-backed extension tool in the registry.
 func registerCommandTool(registry *tools.Registry, kind, name string, spec ToolSpec, audit func(context.Context, string, string, string) error) error {
 	toolName := effectiveToolName(kind, name, spec)
 	inputKeys := append([]string{"username"}, spec.InputKeys...)

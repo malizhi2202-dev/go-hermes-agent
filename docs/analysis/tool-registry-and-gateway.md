@@ -20,7 +20,7 @@
 
 - `plugin.<name>`：来自 `plugin.yaml` 的声明式插件工具
 - `skill.<name>`：来自 `SKILL.md + skill.yaml` 的 skill script 工具
-- `mcp.<server>.<tool>`：来自 `mcp_servers` 的 stdio MCP 工具
+- `mcp.<server>.<tool>`：来自 `mcp_servers` 的 stdio / HTTP MCP 工具
 
 扩展治理能力：
 
@@ -35,7 +35,7 @@
 - 不做 `__init__.py register()` 这类运行时注入
 - plugin / skill 只允许固定命令 + 参数模板执行
 - 参数值会做长度和元字符拦截
-- MCP 当前只接入 `stdio`，并通过配置控制 server 与 tool 范围
+- MCP 当前支持 `stdio` 和受控 `http`，并通过配置控制 server 与 tool 范围
 
 未迁移的高风险工具：
 

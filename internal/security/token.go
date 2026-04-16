@@ -6,12 +6,14 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// Claims is the JWT payload used by the Go runtime.
 type Claims struct {
 	Username string `json:"username"`
 	Role     string `json:"role"`
 	jwt.RegisteredClaims
 }
 
+// SignJWT signs a JWT for a local user session.
 func SignJWT(secret []byte, issuer, username, role string, expiry time.Duration) (string, error) {
 	now := time.Now().UTC()
 	claims := Claims{
@@ -28,6 +30,7 @@ func SignJWT(secret []byte, issuer, username, role string, expiry time.Duration)
 	return token.SignedString(secret)
 }
 
+// ParseJWT validates and parses a JWT into Claims.
 func ParseJWT(secret []byte, tokenString string) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (any, error) {
 		return secret, nil

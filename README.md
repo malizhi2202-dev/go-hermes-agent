@@ -13,6 +13,7 @@
 - 受限版 Tool Registry
 - 受控动态扩展面：plugin / skill script / MCP
 - 基础 Webhook / Telegram Gateway 适配
+- 基础 Webhook / Telegram / Slack Gateway 适配
 - OpenAI 兼容 LLM 调用边界
 - 主流模型 / 本地模型 profile 切换
 - HTTP API 服务
@@ -22,7 +23,7 @@
 
 - `plugin.yaml` 声明式插件发现与工具注册
 - `SKILL.md + skill.yaml` 的 skill script 发现与受控执行
-- `mcp_servers` 配置驱动的 stdio MCP 工具发现与调用
+- `mcp_servers` 配置驱动的 stdio / HTTP MCP 工具发现与调用
 - `/v1/extensions`、`/v1/extensions/refresh`、`/v1/extensions/state` 扩展查询/刷新/启停接口
 - 插件与 skill 的 SQLite 启停状态持久化
 - 基于内容 hash 的基础完整性标记，检测“数据库状态对应的扩展内容已变化”
@@ -55,6 +56,12 @@
 - `GET /v1/context`
 - `POST /v1/multiagent/plan`
 - `POST /v1/multiagent/run`
+- `GET /v1/multiagent/traces`
+- `GET /v1/multiagent/traces/summary`
+- `GET /v1/multiagent/traces/failures`
+- `GET /v1/multiagent/traces/hotspots`
+- `GET /v1/multiagent/replay`
+- `POST /v1/multiagent/resume`
 - 工具：`memory.read`、`memory.write`
 
 多 Agent 运行说明：
@@ -62,7 +69,18 @@
 - `run` 当前会优先尝试受控的 LLM child runtime
 - 如果当前模型缺少可用 API key，或者本地模型端点不可用，会安全回退到 stub runtime
 - 每个 child task 现在会写入独立 child session，并通过 parent session 串联 aggregate 回写
-- 这意味着 Go 版已经有“真实 child runtime 第一版”，但还没开放真实 delegated tools 执行
+- child runtime 现在支持受控多轮循环，并可在 `allowed_tools` 白名单里真实调用安全工具
+- child runtime 现在优先尝试原生 tool-calling，并在不支持时回退到 JSON 协议
+- `run` 返回的每个 child result 现在会附带结构化 `trace`
+- `trace` 也已经持久化到 `multiagent_traces`，可通过 `/v1/multiagent/traces` 查询
+- `/v1/multiagent/traces/summary` 可以看工具级聚合和失败统计
+- `/v1/multiagent/traces/failures` 可以只看失败轨迹
+- `/v1/multiagent/traces/hotspots` 可以看 child/task 维度的失败热点
+- 上面这些 traces 视图都支持 `from/to` 的 RFC3339 时间过滤
+- `GET /v1/multiagent/replay` 可以按 `child_session_id` 回放 child session、trace 和恢复提示
+- `POST /v1/multiagent/resume` 现在会按最后成功/失败 trace step 生成恢复依据，并把最后一次成功 tool state 作为真实初始历史喂回 child loop
+- `webhook / telegram` 现在支持 `/multiagent ...` 命令路由
+- 这意味着 Go 版已经有“真实 child runtime 第一版”，但还没开放递归子代理和高风险 delegated runtime
 
 已明确不直接迁移的高风险能力：
 
@@ -173,20 +191,37 @@ go build -o bin/hermesctl ./cmd/hermesctl
 
 - `cmd/hermesd`：服务端入口
 - `cmd/hermesctl`：管理与登录 CLI
+- `internal/api/README.md`：HTTP API 入口说明
+- `internal/app/README.md`：应用装配与业务协调说明
+- `internal/auth/README.md`：本地认证说明
+- `internal/config/README.md`：配置模型说明
 - `internal/config`：配置加载
 - `internal/store`：SQLite 存储
 - `internal/auth`：账号、登录、JWT
 - `internal/security`：密码哈希与令牌工具
+- `internal/security/README.md`：安全基础组件说明
 - `internal/llm`：OpenAI 兼容 LLM 边界
+- `internal/llm/README.md`：LLM 调用和原生 tool-calling 说明
 - `internal/memory`：文件记忆与 recalled memory 注入
+- `internal/memory/README.md`：记忆系统说明
 - `internal/contextengine`：规则型上下文压缩与后续 LLM compressor 扩展点
+- `internal/contextengine/README.md`：上下文压缩说明
 - `internal/multiagent`：多 Agent 计划、权限策略、调度编排、结果汇总骨架
+- `internal/multiagent/README.md`：多 Agent 主干说明
 - `internal/api`：HTTP API
 - `internal/tools`：受限白名单工具注册
+- `internal/tools/README.md`：工具注册说明
 - `internal/extensions`：plugin / skill / MCP 扩展发现、注册与受控执行
+- `internal/extensions/README.md`：扩展面说明
 - `internal/gateway`：基础 webhook / telegram gateway 适配
+- 当前也包含 Slack slash command 适配
+- `internal/gateway/README.md`：gateway 适配与 `/multiagent` 路由说明
 - `internal/execution`：受控版高风险动态执行边界
+- `internal/execution/README.md`：受控执行说明
+- `internal/models/README.md`：模型目录与发现说明
 - `internal/app`：应用装配
+- `internal/store/README.md`：SQLite 状态与轨迹持久化说明
+- `internal/version/README.md`：版本说明
 - `docs/`：Python 梳理、迁移映射、安全清理说明
 
 ## 当前迁移定位
@@ -207,8 +242,9 @@ go build -o bin/hermesctl ./cmd/hermesctl
 
 ## Go 文档导航
 
-- [Go 版本架构总结](/home/malizhi/project/go-hermes-agent/docs/architecture/go-architecture-summary.md)
-- [Go 版本执行流程图](/home/malizhi/project/go-hermes-agent/docs/architecture/go-execution-flow.md)
-- [Go 版本设计图](/home/malizhi/project/go-hermes-agent/docs/architecture/go-design-diagram.md)
-- [Agent 常见问题与 Hermes 工程对应拆解](/home/malizhi/project/go-hermes-agent/docs/architecture/agent-concepts-vs-hermes.md)
-- [Go 迁移差距清单](/home/malizhi/project/go-hermes-agent/docs/migration/go-gap-checklist.md)
+- [Go 版本架构总结](/home/malizhi/project/hermes-agent/go/docs/architecture/go-architecture-summary.md)
+- [Go 版本执行流程图](/home/malizhi/project/hermes-agent/go/docs/architecture/go-execution-flow.md)
+- [Go 版本设计图](/home/malizhi/project/hermes-agent/go/docs/architecture/go-design-diagram.md)
+- [Agent 常见问题与 Hermes 工程对应拆解](/home/malizhi/project/hermes-agent/go/docs/architecture/agent-concepts-vs-hermes.md)
+- [Go 多 Agent 优化说明](/home/malizhi/project/hermes-agent/go/docs/architecture/multiagent-optimization-notes.md)
+- [Go 迁移差距清单](/home/malizhi/project/hermes-agent/go/docs/migration/go-gap-checklist.md)

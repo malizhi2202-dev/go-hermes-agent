@@ -14,14 +14,17 @@ var blockedTools = []string{
 	"memory.write",
 }
 
+// Policy defines plan safety and scheduling rules.
 type Policy struct {
 	MaxConcurrent int
 }
 
+// DefaultPolicy returns the baseline safety policy used by the Go runtime.
 func DefaultPolicy() Policy {
 	return Policy{MaxConcurrent: 3}
 }
 
+// Validate checks a plan for blocked tools, concurrency limits, and write-scope conflicts.
 func (p Policy) Validate(plan Plan) error {
 	if strings.TrimSpace(plan.Objective) == "" {
 		return fmt.Errorf("objective is required")

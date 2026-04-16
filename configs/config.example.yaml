@@ -85,6 +85,9 @@ gateway:
     enabled: false
     bot_token_env: "TELEGRAM_BOT_TOKEN"
     secret: "change-this-telegram-secret"
+  slack:
+    enabled: false
+    signing_secret_env: "SLACK_SIGNING_SECRET"
 
 execution:
   enabled: false
@@ -116,11 +119,19 @@ extensions:
 mcp_servers:
   filesystem:
     enabled: false
+    transport: "stdio"
     command: "npx"
     args:
       - "-y"
       - "@modelcontextprotocol/server-filesystem"
       - "./"
+    timeout_seconds: 15
+    include_tools: []
+    exclude_tools: []
+  helper_http:
+    enabled: false
+    transport: "http"
+    url: "http://127.0.0.1:8787/mcp"
     timeout_seconds: 15
     include_tools: []
     exclude_tools: []

@@ -48,7 +48,7 @@ flowchart TD
     E --> F{工具类型}
     F -->|builtin| G[内置工具处理]
     F -->|plugin/skill| H[固定命令模板执行]
-    F -->|mcp| I[MCP stdio tools/call]
+    F -->|mcp| I[MCP stdio/http tools/call]
     G --> J[写回结果]
     H --> J
     I --> J

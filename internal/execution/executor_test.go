@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"go-hermes-agent/internal/config"
+	"hermes-agent/go/internal/config"
 )
 
 func TestExecutorBlocksForbiddenArgs(t *testing.T) {

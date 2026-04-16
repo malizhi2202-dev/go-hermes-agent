@@ -6,13 +6,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
-	"go-hermes-agent/internal/app"
-	"go-hermes-agent/internal/config"
+	"hermes-agent/go/internal/app"
+	"hermes-agent/go/internal/config"
 )
 
 func TestToolsEndpointRequiresAuthAndReturnsTools(t *testing.T) {
@@ -275,6 +277,110 @@ func TestMultiAgentPlanAndRunEndpoints(t *testing.T) {
 	firstResult, ok := results[0].(map[string]any)
 	if !ok || firstResult["child_session_id"] == nil {
 		t.Fatalf("expected child_session_id in first result: %#v", results[0])
+	}
+	if firstResult["trace"] == nil {
+		t.Fatalf("expected trace in first result: %#v", results[0])
+	}
+
+	parentSessionID := int64(aggregate["parent_session_id"].(float64))
+	traceReq := httptest.NewRequest(http.MethodGet, "/v1/multiagent/traces?parent_session_id="+strconv.FormatInt(parentSessionID, 10), nil)
+	traceReq.Header.Set("Authorization", "Bearer "+token)
+	traceRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(traceRec, traceReq)
+	if traceRec.Code != http.StatusOK {
+		t.Fatalf("expected trace status 200, got %d body=%s", traceRec.Code, traceRec.Body.String())
+	}
+	var tracePayload []map[string]any
+	if err := json.Unmarshal(traceRec.Body.Bytes(), &tracePayload); err != nil {
+		t.Fatalf("decode trace response: %v", err)
+	}
+	if len(tracePayload) == 0 {
+		t.Fatal("expected persisted multiagent traces")
+	}
+
+	childSessionID := int64(firstResult["child_session_id"].(float64))
+	replayReq := httptest.NewRequest(http.MethodGet, "/v1/multiagent/replay?child_session_id="+strconv.FormatInt(childSessionID, 10), nil)
+	replayReq.Header.Set("Authorization", "Bearer "+token)
+	replayRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(replayRec, replayReq)
+	if replayRec.Code != http.StatusOK {
+		t.Fatalf("expected replay status 200, got %d body=%s", replayRec.Code, replayRec.Body.String())
+	}
+	var replayPayload map[string]any
+	if err := json.Unmarshal(replayRec.Body.Bytes(), &replayPayload); err != nil {
+		t.Fatalf("decode replay response: %v", err)
+	}
+	if replayPayload["recovery_hint"] == nil || replayPayload["trace"] == nil {
+		t.Fatalf("expected replay payload with hint and trace, got %#v", replayPayload)
+	}
+	if replayPayload["resume_basis"] == nil {
+		t.Fatalf("expected replay payload with resume_basis, got %#v", replayPayload)
+	}
+
+	summaryReq := httptest.NewRequest(http.MethodGet, "/v1/multiagent/traces/summary?parent_session_id="+strconv.FormatInt(parentSessionID, 10), nil)
+	summaryReq.Header.Set("Authorization", "Bearer "+token)
+	summaryRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(summaryRec, summaryReq)
+	if summaryRec.Code != http.StatusOK {
+		t.Fatalf("expected summary status 200, got %d body=%s", summaryRec.Code, summaryRec.Body.String())
+	}
+	var summaryPayload []map[string]any
+	if err := json.Unmarshal(summaryRec.Body.Bytes(), &summaryPayload); err != nil {
+		t.Fatalf("decode summary response: %v", err)
+	}
+	if len(summaryPayload) == 0 {
+		t.Fatal("expected trace summary payload")
+	}
+
+	hotReq := httptest.NewRequest(http.MethodGet, "/v1/multiagent/traces/hotspots?parent_session_id="+strconv.FormatInt(parentSessionID, 10), nil)
+	hotReq.Header.Set("Authorization", "Bearer "+token)
+	hotRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(hotRec, hotReq)
+	if hotRec.Code != http.StatusOK {
+		t.Fatalf("expected hotspots status 200, got %d body=%s", hotRec.Code, hotRec.Body.String())
+	}
+	var hotPayload []map[string]any
+	if err := json.Unmarshal(hotRec.Body.Bytes(), &hotPayload); err != nil {
+		t.Fatalf("decode hotspots response: %v", err)
+	}
+	if len(hotPayload) == 0 {
+		t.Fatal("expected hotspot payload")
+	}
+
+	timeReq := httptest.NewRequest(http.MethodGet, "/v1/multiagent/traces/summary?parent_session_id="+strconv.FormatInt(parentSessionID, 10)+"&from="+url.QueryEscape(time.Now().UTC().Add(-time.Hour).Format(time.RFC3339))+"&to="+url.QueryEscape(time.Now().UTC().Add(time.Hour).Format(time.RFC3339)), nil)
+	timeReq.Header.Set("Authorization", "Bearer "+token)
+	timeRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(timeRec, timeReq)
+	if timeRec.Code != http.StatusOK {
+		t.Fatalf("expected time-filtered summary status 200, got %d body=%s", timeRec.Code, timeRec.Body.String())
+	}
+
+	failReq := httptest.NewRequest(http.MethodGet, "/v1/multiagent/traces/failures?parent_session_id="+strconv.FormatInt(parentSessionID, 10), nil)
+	failReq.Header.Set("Authorization", "Bearer "+token)
+	failRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(failRec, failReq)
+	if failRec.Code != http.StatusOK {
+		t.Fatalf("expected failures status 200, got %d body=%s", failRec.Code, failRec.Body.String())
+	}
+
+	resumeBody := []byte(`{"child_session_id":` + strconv.FormatInt(childSessionID, 10) + `}`)
+	resumeReq := httptest.NewRequest(http.MethodPost, "/v1/multiagent/resume", bytes.NewReader(resumeBody))
+	resumeReq.Header.Set("Authorization", "Bearer "+token)
+	resumeRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(resumeRec, resumeReq)
+	if resumeRec.Code != http.StatusOK {
+		t.Fatalf("expected resume status 200, got %d body=%s", resumeRec.Code, resumeRec.Body.String())
+	}
+	var resumePayload map[string]any
+	if err := json.Unmarshal(resumeRec.Body.Bytes(), &resumePayload); err != nil {
+		t.Fatalf("decode resume response: %v", err)
+	}
+	resultPayload, ok := resumePayload["result"].(map[string]any)
+	if !ok || resultPayload["child_session_id"] == nil {
+		t.Fatalf("expected resumed result payload, got %#v", resumePayload)
+	}
+	if resumePayload["resume_basis"] == nil {
+		t.Fatalf("expected resume basis payload, got %#v", resumePayload)
 	}
 }
 

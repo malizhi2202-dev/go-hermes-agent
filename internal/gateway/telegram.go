@@ -11,9 +11,13 @@ import (
 	"strings"
 	"time"
 
-	"go-hermes-agent/internal/app"
+	"hermes-agent/go/internal/app"
 )
 
+// TelegramAdapter handles Telegram webhook ingress and reply delivery.
+//
+// It supports deduplication, reply retries, chat/user session isolation, and a
+// lightweight `/multiagent ...` route into the Go multi-agent runtime.
 type TelegramAdapter struct {
 	app        *app.App
 	httpClient *http.Client
@@ -36,6 +40,7 @@ type telegramUpdate struct {
 	} `json:"message"`
 }
 
+// NewTelegramAdapter creates a Telegram webhook adapter.
 func NewTelegramAdapter(application *app.App) *TelegramAdapter {
 	return &TelegramAdapter{
 		app:        application,
@@ -45,6 +50,8 @@ func NewTelegramAdapter(application *app.App) *TelegramAdapter {
 	}
 }
 
+// HandleWebhook validates the Telegram secret, deduplicates updates, routes
+// the message into chat or multi-agent execution, and sends the reply.
 func (a *TelegramAdapter) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	cfg := a.app.Config.Gateway.Telegram
 	if !cfg.Enabled {
@@ -88,7 +95,7 @@ func (a *TelegramAdapter) HandleWebhook(w http.ResponseWriter, r *http.Request) 
 		displayName = fmt.Sprintf("telegram:%d", update.Message.From.ID)
 	}
 	sessionPrincipal := fmt.Sprintf("telegram:chat:%d:user:%d", update.Message.Chat.ID, update.Message.From.ID)
-	response, err := a.chatFn(context.Background(), sessionPrincipal, update.Message.Text)
+	response, err := a.routeMessage(context.Background(), sessionPrincipal, update.Message.Text)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -135,4 +142,11 @@ func (a *TelegramAdapter) sendMessage(ctx context.Context, chatID int64, text st
 		time.Sleep(time.Duration(attempt+1) * 300 * time.Millisecond)
 	}
 	return lastErr
+}
+
+func (a *TelegramAdapter) routeMessage(ctx context.Context, username, text string) (string, error) {
+	if objective, ok := parseMultiAgentCommand(text); ok {
+		return a.app.RunGatewayMultiAgent(ctx, username, objective)
+	}
+	return a.chatFn(ctx, username, text)
 }

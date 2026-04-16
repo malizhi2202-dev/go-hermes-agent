@@ -7,13 +7,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
-	"go-hermes-agent/internal/config"
-	"go-hermes-agent/internal/tools"
+	"hermes-agent/go/internal/config"
+	"hermes-agent/go/internal/tools"
 )
 
 type mcpRequest struct {
@@ -32,8 +33,15 @@ type mcpResponse struct {
 	} `json:"error,omitempty"`
 }
 
+type mcpClient interface {
+	initialize() error
+	request(method string, params any) (json.RawMessage, error)
+	close()
+}
+
+// listMCPTools discovers tools from one configured MCP server.
 func listMCPTools(ctx context.Context, name string, cfg config.MCPServerConfig) ([]MCPTool, error) {
-	client, err := newMCPStdioClient(ctx, cfg)
+	client, err := newMCPClient(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -69,6 +77,7 @@ func listMCPTools(ctx context.Context, name string, cfg config.MCPServerConfig) 
 	return result, nil
 }
 
+// registerMCPTool registers one discovered MCP tool as a safe Go tool.
 func registerMCPTool(registry *tools.Registry, serverName string, cfg config.MCPServerConfig, toolDef MCPTool, audit func(context.Context, string, string, string) error) error {
 	toolName := fmt.Sprintf("mcp.%s.%s", sanitizeName(serverName), sanitizeName(toolDef.Name))
 	inputKeys := mcpInputKeys(toolDef.InputSchema)
@@ -86,7 +95,7 @@ func registerMCPTool(registry *tools.Registry, serverName string, cfg config.MCP
 			if audit != nil {
 				_ = audit(ctx, username, "mcp_call_attempt", fmt.Sprintf("server=%s tool=%s", serverName, toolDef.Name))
 			}
-			client, err := newMCPStdioClient(ctx, cfg)
+			client, err := newMCPClient(ctx, cfg)
 			if err != nil {
 				if audit != nil {
 					_ = audit(ctx, username, "mcp_call_denied", err.Error())
@@ -123,6 +132,15 @@ func registerMCPTool(registry *tools.Registry, serverName string, cfg config.MCP
 	})
 }
 
+func newMCPClient(ctx context.Context, cfg config.MCPServerConfig) (mcpClient, error) {
+	switch normalizedMCPTransport(cfg) {
+	case "http":
+		return newMCPHTTPClient(ctx, cfg)
+	default:
+		return newMCPStdioClient(ctx, cfg)
+	}
+}
+
 func mcpInputKeys(schema map[string]any) []string {
 	properties, ok := schema["properties"].(map[string]any)
 	if !ok {
@@ -151,6 +169,11 @@ type mcpStdioClient struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	reader *bufio.Reader
+}
+
+type mcpHTTPClient struct {
+	client *http.Client
+	url    string
 }
 
 func newMCPStdioClient(ctx context.Context, cfg config.MCPServerConfig) (*mcpStdioClient, error) {
@@ -185,6 +208,21 @@ func newMCPStdioClient(ctx context.Context, cfg config.MCPServerConfig) (*mcpStd
 	}, nil
 }
 
+func newMCPHTTPClient(ctx context.Context, cfg config.MCPServerConfig) (*mcpHTTPClient, error) {
+	timeout := cfg.TimeoutSeconds
+	if timeout <= 0 {
+		timeout = 15
+	}
+	url := strings.TrimSpace(cfg.URL)
+	if url == "" {
+		return nil, fmt.Errorf("mcp http url is required")
+	}
+	return &mcpHTTPClient{
+		client: &http.Client{Timeout: time.Duration(timeout) * time.Second},
+		url:    url,
+	}, nil
+}
+
 func (c *mcpStdioClient) close() {
 	if c.stdin != nil {
 		_ = c.stdin.Close()
@@ -209,6 +247,23 @@ func (c *mcpStdioClient) initialize() error {
 	return c.notify("notifications/initialized", map[string]any{})
 }
 
+func (c *mcpHTTPClient) close() {}
+
+func (c *mcpHTTPClient) initialize() error {
+	if _, err := c.request("initialize", map[string]any{
+		"protocolVersion": "2024-11-05",
+		"capabilities":    map[string]any{},
+		"clientInfo": map[string]any{
+			"name":    "hermes-go",
+			"version": "0.1.0",
+		},
+	}); err != nil {
+		return err
+	}
+	_, err := c.request("notifications/initialized", map[string]any{})
+	return err
+}
+
 func (c *mcpStdioClient) notify(method string, params any) error {
 	return c.send(mcpRequest{
 		JSONRPC: "2.0",
@@ -228,6 +283,47 @@ func (c *mcpStdioClient) request(method string, params any) (json.RawMessage, er
 	}
 	response, err := c.readResponse()
 	if err != nil {
+		return nil, err
+	}
+	if response.Error != nil {
+		return nil, fmt.Errorf("mcp error %d: %s", response.Error.Code, response.Error.Message)
+	}
+	return response.Result, nil
+}
+
+func (c *mcpHTTPClient) request(method string, params any) (json.RawMessage, error) {
+	body, err := json.Marshal(mcpRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  method,
+		Params:  params,
+	})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("mcp http status %d", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	var response mcpResponse
+	if err := json.Unmarshal(raw, &response); err != nil {
 		return nil, err
 	}
 	if response.Error != nil {
@@ -312,4 +408,12 @@ func sortStrings(values []string) {
 			}
 		}
 	}
+}
+
+func normalizedMCPTransport(cfg config.MCPServerConfig) string {
+	transport := strings.ToLower(strings.TrimSpace(cfg.Transport))
+	if transport == "" {
+		return "stdio"
+	}
+	return transport
 }

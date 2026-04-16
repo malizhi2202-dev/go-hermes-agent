@@ -3,36 +3,47 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"go-hermes-agent/internal/app"
-	"go-hermes-agent/internal/gateway"
-	"go-hermes-agent/internal/multiagent"
-	"go-hermes-agent/internal/store"
+	"hermes-agent/go/internal/app"
+	"hermes-agent/go/internal/gateway"
+	"hermes-agent/go/internal/multiagent"
+	"hermes-agent/go/internal/store"
 )
 
+// Server exposes the authenticated HTTP API and gateway webhook routes.
 type Server struct {
 	app *app.App
 }
 
+// New creates an HTTP API server bound to the supplied application container.
 func New(app *app.App) *Server {
 	return &Server{app: app}
 }
 
+// Handler returns the top-level HTTP handler with all API and gateway routes registered.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	webhook := gateway.NewWebhookAdapter(s.app)
 	telegram := gateway.NewTelegramAdapter(s.app)
+	slack := gateway.NewSlackAdapter(s.app)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/auth/login", s.handleLogin)
 	mux.Handle("/v1/chat", s.authMiddleware(http.HandlerFunc(s.handleChat)))
 	mux.Handle("/v1/context", s.authMiddleware(http.HandlerFunc(s.handleContext)))
 	mux.Handle("/v1/multiagent/plan", s.authMiddleware(http.HandlerFunc(s.handleMultiAgentPlan)))
 	mux.Handle("/v1/multiagent/run", s.authMiddleware(http.HandlerFunc(s.handleMultiAgentRun)))
+	mux.Handle("/v1/multiagent/traces", s.authMiddleware(http.HandlerFunc(s.handleMultiAgentTraces)))
+	mux.Handle("/v1/multiagent/traces/summary", s.authMiddleware(http.HandlerFunc(s.handleMultiAgentTraceSummary)))
+	mux.Handle("/v1/multiagent/traces/failures", s.authMiddleware(http.HandlerFunc(s.handleMultiAgentTraceFailures)))
+	mux.Handle("/v1/multiagent/traces/hotspots", s.authMiddleware(http.HandlerFunc(s.handleMultiAgentTraceHotspots)))
+	mux.Handle("/v1/multiagent/replay", s.authMiddleware(http.HandlerFunc(s.handleMultiAgentReplay)))
+	mux.Handle("/v1/multiagent/resume", s.authMiddleware(http.HandlerFunc(s.handleMultiAgentResume)))
 	mux.Handle("/v1/memory", s.authMiddleware(http.HandlerFunc(s.handleMemory)))
 	mux.Handle("/v1/models", s.authMiddleware(http.HandlerFunc(s.handleModels)))
 	mux.Handle("/v1/models/discover", s.authMiddleware(http.HandlerFunc(s.handleDiscoverModels)))
@@ -49,9 +60,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/v1/tools/execute", s.authMiddleware(http.HandlerFunc(s.handleExecuteTool)))
 	mux.HandleFunc("/gateway/webhook", webhook.HandleWebhook)
 	mux.HandleFunc("/gateway/telegram/webhook", telegram.HandleWebhook)
+	mux.HandleFunc("/gateway/slack/command", slack.HandleCommand)
 	return mux
 }
 
+// ListenAndServe starts the HTTP server and stops it when the context is cancelled.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	server := &http.Server{
 		Addr:         s.app.Config.ListenAddr,
@@ -179,6 +192,157 @@ func (s *Server) handleMultiAgentRun(w http.ResponseWriter, r *http.Request) {
 		"results":   results,
 		"aggregate": aggregate,
 	})
+}
+
+func (s *Server) handleMultiAgentTraces(w http.ResponseWriter, r *http.Request) {
+	filters, err := multiAgentTraceFiltersFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	filters.Username = usernameFromContext(r.Context())
+	records, err := s.app.Store.ListMultiAgentTraces(r.Context(), filters)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, records)
+}
+
+func (s *Server) handleMultiAgentTraceSummary(w http.ResponseWriter, r *http.Request) {
+	filters, err := multiAgentTraceFiltersFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	filters.Username = usernameFromContext(r.Context())
+	records, err := s.app.Store.SummarizeMultiAgentTraces(r.Context(), filters)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, records)
+}
+
+func (s *Server) handleMultiAgentTraceFailures(w http.ResponseWriter, r *http.Request) {
+	filters, err := multiAgentTraceFiltersFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	filters.Username = usernameFromContext(r.Context())
+	records, err := s.app.Store.ListMultiAgentTraceFailures(r.Context(), filters)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, records)
+}
+
+func (s *Server) handleMultiAgentTraceHotspots(w http.ResponseWriter, r *http.Request) {
+	filters, err := multiAgentTraceFiltersFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	filters.Username = usernameFromContext(r.Context())
+	records, err := s.app.Store.ListMultiAgentTraceHotspots(r.Context(), filters)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, records)
+}
+
+func (s *Server) handleMultiAgentReplay(w http.ResponseWriter, r *http.Request) {
+	username := usernameFromContext(r.Context())
+	raw := strings.TrimSpace(r.URL.Query().Get("child_session_id"))
+	if raw == "" {
+		http.Error(w, "child_session_id is required", http.StatusBadRequest)
+		return
+	}
+	childSessionID, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || childSessionID <= 0 {
+		http.Error(w, "invalid child_session_id", http.StatusBadRequest)
+		return
+	}
+	payload, err := s.app.ReplayMultiAgentChild(r.Context(), username, childSessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *Server) handleMultiAgentResume(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	username := usernameFromContext(r.Context())
+	var req struct {
+		ChildSessionID int64    `json:"child_session_id"`
+		AllowedTools   []string `json:"allowed_tools"`
+		HistoryWindow  int      `json:"history_window"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	result, err := s.app.ResumeMultiAgentChild(r.Context(), username, req.ChildSessionID, req.AllowedTools, req.HistoryWindow)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func multiAgentTraceFiltersFromRequest(r *http.Request) (store.MultiAgentTraceFilters, error) {
+	filters := store.MultiAgentTraceFilters{Limit: 50}
+	if raw := strings.TrimSpace(r.URL.Query().Get("parent_session_id")); raw != "" {
+		value, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return store.MultiAgentTraceFilters{}, fmt.Errorf("invalid parent_session_id")
+		}
+		filters.ParentSessionID = value
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("child_session_id")); raw != "" {
+		value, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return store.MultiAgentTraceFilters{}, fmt.Errorf("invalid child_session_id")
+		}
+		filters.ChildSessionID = value
+	}
+	filters.TaskID = strings.TrimSpace(r.URL.Query().Get("task_id"))
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			return store.MultiAgentTraceFilters{}, fmt.Errorf("invalid limit")
+		}
+		filters.Limit = value
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 0 {
+			return store.MultiAgentTraceFilters{}, fmt.Errorf("invalid offset")
+		}
+		filters.Offset = value
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("from")); raw != "" {
+		value, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			return store.MultiAgentTraceFilters{}, fmt.Errorf("invalid from")
+		}
+		filters.FromTime = value
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("to")); raw != "" {
+		value, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			return store.MultiAgentTraceFilters{}, fmt.Errorf("invalid to")
+		}
+		filters.ToTime = value
+	}
+	return filters, nil
 }
 
 func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {

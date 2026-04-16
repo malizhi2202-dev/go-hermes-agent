@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"go-hermes-agent/internal/config"
+	"hermes-agent/go/internal/config"
 )
 
 func TestFileProviderWriteReadAndPrefetch(t *testing.T) {

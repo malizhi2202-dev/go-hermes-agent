@@ -11,13 +11,15 @@ import (
 	"strings"
 	"time"
 
-	"go-hermes-agent/internal/config"
+	"hermes-agent/go/internal/config"
 )
 
+// Catalog stores model profile aliases and discovery helpers.
 type Catalog struct {
 	Aliases map[string]string
 }
 
+// DiscoveredModel is one model found on a local or OpenAI-compatible endpoint.
 type DiscoveredModel struct {
 	Source      string           `json:"source"`
 	ProfileName string           `json:"profile_name"`
@@ -28,6 +30,7 @@ type DiscoveredModel struct {
 	Config      config.LLMConfig `json:"config"`
 }
 
+// DefaultCatalog returns the built-in alias catalog.
 func DefaultCatalog() Catalog {
 	return Catalog{
 		Aliases: map[string]string{
@@ -44,6 +47,7 @@ func DefaultCatalog() Catalog {
 	}
 }
 
+// ResolveProfile resolves a profile name from aliases, display names, or models.
 func (c Catalog) ResolveProfile(profiles map[string]config.LLMConfig, raw string) (string, bool) {
 	name := strings.TrimSpace(strings.ToLower(raw))
 	if name == "" {
@@ -74,6 +78,7 @@ func (c Catalog) ResolveProfile(profiles map[string]config.LLMConfig, raw string
 	return "", false
 }
 
+// DiscoverLocalModels scans local-compatible profiles and discovers available models.
 func DiscoverLocalModels(ctx context.Context, profiles map[string]config.LLMConfig) ([]DiscoveredModel, error) {
 	client := &http.Client{Timeout: 3 * time.Second}
 	discovered := make([]DiscoveredModel, 0)

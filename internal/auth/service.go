@@ -8,17 +8,19 @@ import (
 	"os"
 	"time"
 
-	"go-hermes-agent/internal/config"
-	"go-hermes-agent/internal/security"
-	"go-hermes-agent/internal/store"
+	"hermes-agent/go/internal/config"
+	"hermes-agent/go/internal/security"
+	"hermes-agent/go/internal/store"
 )
 
+// Service manages local-user authentication and JWT issuance.
 type Service struct {
 	cfg       config.Config
 	store     *store.Store
 	jwtSecret []byte
 }
 
+// NewService creates the auth service and ensures a signing secret exists.
 func NewService(cfg config.Config, st *store.Store) (*Service, error) {
 	secret, err := loadOrCreateSecret(cfg.JWTSecretPath())
 	if err != nil {
@@ -41,6 +43,7 @@ func loadOrCreateSecret(path string) ([]byte, error) {
 	return []byte(secret), nil
 }
 
+// InitAdmin creates the initial local administrator account.
 func (s *Service) InitAdmin(ctx context.Context, username, password string) error {
 	if len(password) < s.cfg.Security.MinPasswordLength {
 		return fmt.Errorf("password length must be at least %d", s.cfg.Security.MinPasswordLength)
@@ -55,6 +58,7 @@ func (s *Service) InitAdmin(ctx context.Context, username, password string) erro
 	return s.store.WriteAudit(ctx, username, "init_admin", "administrator created")
 }
 
+// Login validates local credentials and returns a signed JWT on success.
 func (s *Service) Login(ctx context.Context, username, password string) (string, error) {
 	user, err := s.store.GetUser(ctx, username)
 	if err != nil {
@@ -90,6 +94,7 @@ func (s *Service) Login(ctx context.Context, username, password string) (string,
 	return token, nil
 }
 
+// ParseToken validates and parses a signed JWT.
 func (s *Service) ParseToken(token string) (*security.Claims, error) {
 	return security.ParseJWT(s.jwtSecret, token)
 }

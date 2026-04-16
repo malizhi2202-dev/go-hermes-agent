@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"go-hermes-agent/internal/config"
-	"go-hermes-agent/internal/llm"
+	"hermes-agent/go/internal/config"
+	"hermes-agent/go/internal/llm"
 )
 
 type Compressor struct {

@@ -7,9 +7,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"go-hermes-agent/internal/api"
-	"go-hermes-agent/internal/app"
-	"go-hermes-agent/internal/config"
+	"hermes-agent/go/internal/api"
+	"hermes-agent/go/internal/app"
+	"hermes-agent/go/internal/config"
 )
 
 func main() {

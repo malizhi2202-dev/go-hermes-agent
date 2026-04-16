@@ -10,6 +10,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Config is the top-level Go runtime configuration.
 type Config struct {
 	AppName             string                     `yaml:"app_name"`
 	ListenAddr          string                     `yaml:"listen_addr"`
@@ -29,6 +30,7 @@ type Config struct {
 	MCPServers          map[string]MCPServerConfig `yaml:"mcp_servers"`
 }
 
+// LLMConfig defines one resolved or profile-backed model endpoint.
 type LLMConfig struct {
 	Provider       string `yaml:"provider"`
 	Model          string `yaml:"model"`
@@ -39,6 +41,7 @@ type LLMConfig struct {
 	Local          bool   `yaml:"local"`
 }
 
+// SecurityConfig controls auth and login hardening.
 type SecurityConfig struct {
 	RequireAuth       bool `yaml:"require_auth"`
 	AllowRegistration bool `yaml:"allow_registration"`
@@ -47,6 +50,7 @@ type SecurityConfig struct {
 	LoginWindowMinute int  `yaml:"login_window_minutes"`
 }
 
+// MemoryConfig controls built-in memory persistence and recall limits.
 type MemoryConfig struct {
 	Enabled         bool `yaml:"enabled"`
 	MemoryCharLimit int  `yaml:"memory_char_limit"`
@@ -54,6 +58,7 @@ type MemoryConfig struct {
 	RecallLimit     int  `yaml:"recall_limit"`
 }
 
+// ContextConfig controls history windows and compression behavior.
 type ContextConfig struct {
 	HistoryWindowMessages     int    `yaml:"history_window_messages"`
 	MaxPromptChars            int    `yaml:"max_prompt_chars"`
@@ -64,25 +69,36 @@ type ContextConfig struct {
 	SummaryStrategy           string `yaml:"summary_strategy"`
 }
 
+// ServerConfig controls HTTP server timeouts.
 type ServerConfig struct {
 	ReadTimeoutSeconds  int `yaml:"read_timeout_seconds"`
 	WriteTimeoutSeconds int `yaml:"write_timeout_seconds"`
 	IdleTimeoutSeconds  int `yaml:"idle_timeout_seconds"`
 }
 
+// GatewayConfig controls inbound gateway adapters.
 type GatewayConfig struct {
 	Enabled          bool                  `yaml:"enabled"`
 	Token            string                `yaml:"token"`
 	AllowedPlatforms []string              `yaml:"allowed_platforms"`
 	Telegram         TelegramGatewayConfig `yaml:"telegram"`
+	Slack            SlackGatewayConfig    `yaml:"slack"`
 }
 
+// TelegramGatewayConfig holds Telegram webhook settings.
 type TelegramGatewayConfig struct {
 	Enabled     bool   `yaml:"enabled"`
 	BotTokenEnv string `yaml:"bot_token_env"`
 	Secret      string `yaml:"secret"`
 }
 
+// SlackGatewayConfig holds Slack slash-command ingress settings.
+type SlackGatewayConfig struct {
+	Enabled          bool   `yaml:"enabled"`
+	SigningSecretEnv string `yaml:"signing_secret_env"`
+}
+
+// ExecutionConfig controls the constrained command execution runtime.
 type ExecutionConfig struct {
 	Enabled         bool                   `yaml:"enabled"`
 	TimeoutSeconds  int                    `yaml:"timeout_seconds"`
@@ -93,6 +109,7 @@ type ExecutionConfig struct {
 	CommandRules    map[string]CommandRule `yaml:"command_rules"`
 }
 
+// CommandRule holds per-command execution limits.
 type CommandRule struct {
 	MaxArgs            int      `yaml:"max_args"`
 	MaxArgLength       int      `yaml:"max_arg_length"`
@@ -101,12 +118,16 @@ type CommandRule struct {
 	DeniedSubstrings   []string `yaml:"denied_substrings"`
 }
 
+// ExtensionConfig configures plugin and skill discovery roots.
 type ExtensionConfig struct {
 	PluginsDir string   `yaml:"plugins_dir"`
 	SkillsDirs []string `yaml:"skills_dirs"`
 }
 
+// MCPServerConfig describes one configured MCP server.
 type MCPServerConfig struct {
+	Transport      string            `yaml:"transport"`
+	URL            string            `yaml:"url"`
 	Enabled        bool              `yaml:"enabled"`
 	Command        string            `yaml:"command"`
 	Args           []string          `yaml:"args"`
@@ -116,6 +137,7 @@ type MCPServerConfig struct {
 	ExcludeTools   []string          `yaml:"exclude_tools"`
 }
 
+// Default returns the baseline Go runtime config.
 func Default() Config {
 	return Config{
 		AppName:          "hermes-go",
@@ -204,6 +226,10 @@ func Default() Config {
 				BotTokenEnv: "TELEGRAM_BOT_TOKEN",
 				Secret:      "change-this-telegram-secret",
 			},
+			Slack: SlackGatewayConfig{
+				Enabled:          false,
+				SigningSecretEnv: "SLACK_SIGNING_SECRET",
+			},
 		},
 		Execution: ExecutionConfig{
 			Enabled:         false,
@@ -234,6 +260,7 @@ func Default() Config {
 	}
 }
 
+// Load reads and validates config from disk.
 func Load(path string) (Config, error) {
 	cfg := Default()
 	raw, err := os.ReadFile(path)
@@ -249,6 +276,7 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+// Save writes config to disk in YAML format.
 func Save(path string, cfg Config) error {
 	raw, err := yaml.Marshal(&cfg)
 	if err != nil {
@@ -337,8 +365,21 @@ func (c Config) Validate() error {
 		if !server.Enabled {
 			continue
 		}
-		if server.Command == "" {
-			return fmt.Errorf("mcp_servers.%s.command is required", name)
+		transport := strings.ToLower(strings.TrimSpace(server.Transport))
+		if transport == "" {
+			transport = "stdio"
+		}
+		switch transport {
+		case "stdio":
+			if server.Command == "" {
+				return fmt.Errorf("mcp_servers.%s.command is required", name)
+			}
+		case "http":
+			if strings.TrimSpace(server.URL) == "" {
+				return fmt.Errorf("mcp_servers.%s.url is required", name)
+			}
+		default:
+			return fmt.Errorf("mcp_servers.%s.transport must be stdio or http", name)
 		}
 		if server.TimeoutSeconds <= 0 {
 			return fmt.Errorf("mcp_servers.%s.timeout_seconds must be > 0", name)

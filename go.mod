@@ -1,4 +1,4 @@
-module go-hermes-agent
+module hermes-agent/go
 
 go 1.24.0
 

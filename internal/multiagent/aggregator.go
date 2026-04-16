@@ -2,12 +2,15 @@ package multiagent
 
 import "slices"
 
+// Aggregator merges task results into one top-level outcome.
 type Aggregator struct{}
 
+// NewAggregator creates a result aggregator.
 func NewAggregator() *Aggregator {
 	return &Aggregator{}
 }
 
+// Aggregate merges results, de-duplicates risks, and rolls up counts.
 func (a *Aggregator) Aggregate(results []Result) Aggregate {
 	out := Aggregate{
 		Summaries:    make([]string, 0, len(results)),

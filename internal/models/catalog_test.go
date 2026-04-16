@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"go-hermes-agent/internal/config"
+	"hermes-agent/go/internal/config"
 )
 
 func TestResolveProfileSupportsAliases(t *testing.T) {

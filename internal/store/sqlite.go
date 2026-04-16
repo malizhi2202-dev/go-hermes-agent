@@ -11,10 +11,15 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// Store wraps the SQLite connection used by the Go runtime.
+//
+// It owns user auth state, sessions, messages, audit rows, extension state,
+// context summaries, and multi-agent traces.
 type Store struct {
 	db *sql.DB
 }
 
+// User is the persisted local account record.
 type User struct {
 	ID             int64
 	Username       string
@@ -25,6 +30,7 @@ type User struct {
 	FailedAttempts int
 }
 
+// Session represents one stored conversation or delegated task run.
 type Session struct {
 	ID              int64         `json:"id"`
 	Username        string        `json:"username"`
@@ -37,6 +43,7 @@ type Session struct {
 	CreatedAt       time.Time     `json:"created_at"`
 }
 
+// Message is one chat or tool transcript row inside a session.
 type Message struct {
 	ID        int64     `json:"id"`
 	SessionID int64     `json:"session_id"`
@@ -46,6 +53,7 @@ type Message struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// SearchResult is one FTS-backed history match.
 type SearchResult struct {
 	SessionID   int64     `json:"session_id"`
 	MessageID   int64     `json:"message_id"`
@@ -57,6 +65,7 @@ type SearchResult struct {
 	SessionTime time.Time `json:"session_time"`
 }
 
+// SearchFilters controls history search scope.
 type SearchFilters struct {
 	Username  string
 	Query     string
@@ -67,6 +76,7 @@ type SearchFilters struct {
 	Limit     int
 }
 
+// AuditRecord is one audit event written by the runtime.
 type AuditRecord struct {
 	ID        int64     `json:"id"`
 	Username  string    `json:"username"`
@@ -75,6 +85,7 @@ type AuditRecord struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// AuditFilters controls audit log queries.
 type AuditFilters struct {
 	Username string
 	Action   string
@@ -84,6 +95,7 @@ type AuditFilters struct {
 	Offset   int
 }
 
+// ExtensionState stores persisted enable/disable state for dynamic extensions.
 type ExtensionState struct {
 	Kind      string    `json:"kind"`
 	Name      string    `json:"name"`
@@ -92,6 +104,7 @@ type ExtensionState struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// ContextSummary stores the persisted compressed summary for one user.
 type ContextSummary struct {
 	Username  string    `json:"username"`
 	Summary   string    `json:"summary"`
@@ -99,6 +112,55 @@ type ContextSummary struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// MultiAgentTraceRecord stores one structured child-agent trajectory step.
+type MultiAgentTraceRecord struct {
+	ID              int64     `json:"id"`
+	Username        string    `json:"username"`
+	ParentSessionID int64     `json:"parent_session_id"`
+	ChildSessionID  int64     `json:"child_session_id"`
+	TaskID          string    `json:"task_id"`
+	Iteration       int       `json:"iteration"`
+	Type            string    `json:"type"`
+	Tool            string    `json:"tool,omitempty"`
+	InputJSON       string    `json:"input_json,omitempty"`
+	OutputJSON      string    `json:"output_json,omitempty"`
+	Error           string    `json:"error,omitempty"`
+	Note            string    `json:"note,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+// MultiAgentTraceFilters scopes multi-agent trace queries.
+type MultiAgentTraceFilters struct {
+	Username        string
+	ParentSessionID int64
+	ChildSessionID  int64
+	TaskID          string
+	FromTime        time.Time
+	ToTime          time.Time
+	Limit           int
+	Offset          int
+}
+
+// MultiAgentTraceSummary summarizes trace usage and failures by tool and step type.
+type MultiAgentTraceSummary struct {
+	Tool       string `json:"tool,omitempty"`
+	Type       string `json:"type"`
+	Total      int    `json:"total"`
+	Failures   int    `json:"failures"`
+	LastError  string `json:"last_error,omitempty"`
+	LastSeenAt string `json:"last_seen_at,omitempty"`
+}
+
+// MultiAgentTraceHotspot summarizes failure-heavy child sessions and tasks.
+type MultiAgentTraceHotspot struct {
+	ParentSessionID int64  `json:"parent_session_id"`
+	ChildSessionID  int64  `json:"child_session_id"`
+	TaskID          string `json:"task_id"`
+	Total           int    `json:"total"`
+	Failures        int    `json:"failures"`
+}
+
+// Open opens or creates the SQLite database and applies the required schema.
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
@@ -183,6 +245,23 @@ CREATE TABLE IF NOT EXISTS context_summaries (
     strategy TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS multiagent_traces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,
+    parent_session_id INTEGER NOT NULL,
+    child_session_id INTEGER NOT NULL,
+    task_id TEXT NOT NULL,
+    iteration INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    tool TEXT NOT NULL DEFAULT '',
+    input_json TEXT NOT NULL DEFAULT '',
+    output_json TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_multiagent_traces_parent ON multiagent_traces(parent_session_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_multiagent_traces_child ON multiagent_traces(child_session_id, id DESC);
 `); err != nil {
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
@@ -224,10 +303,12 @@ func ensureColumn(db *sql.DB, table, column, definition string) error {
 	return err
 }
 
+// Close closes the underlying SQLite connection.
 func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// CreateUser inserts a new local user.
 func (s *Store) CreateUser(ctx context.Context, username, passwordHash, role string) error {
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO users (username, password_hash, role, created_at)
@@ -235,6 +316,7 @@ VALUES (?, ?, ?, ?)`, username, passwordHash, role, time.Now().UTC().Format(time
 	return err
 }
 
+// GetUser loads a local user by username.
 func (s *Store) GetUser(ctx context.Context, username string) (*User, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT id, username, password_hash, role, created_at, locked_until, failed_attempts
@@ -260,6 +342,7 @@ FROM users WHERE username = ?`, username)
 	return &user, nil
 }
 
+// UpdateLoginFailure updates failed login counters and optional lockout time.
 func (s *Store) UpdateLoginFailure(ctx context.Context, username string, failedAttempts int, lockedUntil *time.Time) error {
 	var value any
 	if lockedUntil != nil {
@@ -271,12 +354,14 @@ UPDATE users SET failed_attempts = ?, locked_until = ? WHERE username = ?`,
 	return err
 }
 
+// ResetLoginFailures clears failed login counters for a user.
 func (s *Store) ResetLoginFailures(ctx context.Context, username string) error {
 	_, err := s.db.ExecContext(ctx, `
 UPDATE users SET failed_attempts = 0, locked_until = NULL WHERE username = ?`, username)
 	return err
 }
 
+// WriteAudit appends one audit log row.
 func (s *Store) WriteAudit(ctx context.Context, username, action, detail string) error {
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO audit_log (username, action, detail, created_at)
@@ -284,6 +369,7 @@ VALUES (?, ?, ?, ?)`, username, action, detail, time.Now().UTC().Format(time.RFC
 	return err
 }
 
+// UpsertExtensionState saves extension enablement and integrity state.
 func (s *Store) UpsertExtensionState(ctx context.Context, kind, name string, enabled bool, hash string) error {
 	enabledInt := 0
 	if enabled {
@@ -300,6 +386,7 @@ ON CONFLICT(kind, name) DO UPDATE SET
 	return err
 }
 
+// ListExtensionStates returns all persisted extension state rows.
 func (s *Store) ListExtensionStates(ctx context.Context) ([]ExtensionState, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT kind, name, enabled, hash, updated_at
@@ -327,6 +414,7 @@ ORDER BY kind, name`)
 	return states, rows.Err()
 }
 
+// GetContextSummary returns the stored compressed context summary for a user.
 func (s *Store) GetContextSummary(ctx context.Context, username string) (ContextSummary, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT username, summary, strategy, updated_at
@@ -348,6 +436,7 @@ WHERE username = ?`, username)
 	return summary, nil
 }
 
+// UpsertContextSummary writes or updates the stored context summary for a user.
 func (s *Store) UpsertContextSummary(ctx context.Context, username, summary, strategy string) error {
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO context_summaries (username, summary, strategy, updated_at)
@@ -360,6 +449,7 @@ ON CONFLICT(username) DO UPDATE SET
 	return err
 }
 
+// ListAudit returns audit events filtered by username and action.
 func (s *Store) ListAudit(ctx context.Context, username, action string, limit int) ([]AuditRecord, error) {
 	return s.ListAuditFiltered(ctx, AuditFilters{
 		Username: username,
@@ -368,6 +458,7 @@ func (s *Store) ListAudit(ctx context.Context, username, action string, limit in
 	})
 }
 
+// ListAuditFiltered returns audit events using structured filters.
 func (s *Store) ListAuditFiltered(ctx context.Context, filters AuditFilters) ([]AuditRecord, error) {
 	if filters.Limit <= 0 {
 		filters.Limit = 50
@@ -419,16 +510,19 @@ WHERE 1=1`
 	return records, rows.Err()
 }
 
+// CreateSessionOptions controls extra metadata recorded for a session.
 type CreateSessionOptions struct {
 	Kind            string
 	TaskID          string
 	ParentSessionID int64
 }
 
+// CreateSession creates a standard chat session row.
 func (s *Store) CreateSession(ctx context.Context, username, model, prompt, response string) (int64, error) {
 	return s.CreateSessionWithOptions(ctx, username, model, prompt, response, CreateSessionOptions{})
 }
 
+// CreateSessionWithOptions creates a session row with delegated-task metadata.
 func (s *Store) CreateSessionWithOptions(ctx context.Context, username, model, prompt, response string, opts CreateSessionOptions) (int64, error) {
 	kind := opts.Kind
 	if kind == "" {
@@ -448,10 +542,12 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 	return result.LastInsertId()
 }
 
+// ListSessions returns recent sessions for a user.
 func (s *Store) ListSessions(ctx context.Context, username string, limit int) ([]Session, error) {
 	return s.ListSessionsPage(ctx, username, limit, 0)
 }
 
+// ListSessionsPage returns recent sessions for a user with pagination.
 func (s *Store) ListSessionsPage(ctx context.Context, username string, limit, offset int) ([]Session, error) {
 	if limit <= 0 {
 		limit = 20
@@ -485,6 +581,26 @@ LIMIT ? OFFSET ?`, username, limit, offset)
 	return sessions, rows.Err()
 }
 
+// GetSession loads one session by ID.
+func (s *Store) GetSession(ctx context.Context, sessionID int64) (Session, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT id, username, model, prompt, response, kind, task_id, parent_session_id, created_at
+FROM sessions
+WHERE id = ?`, sessionID)
+	var session Session
+	var createdAt string
+	if err := row.Scan(&session.ID, &session.Username, &session.Model, &session.Prompt, &session.Response, &session.Kind, &session.TaskID, &session.ParentSessionID, &createdAt); err != nil {
+		return Session{}, err
+	}
+	parsed, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return Session{}, err
+	}
+	session.CreatedAt = parsed
+	return session, nil
+}
+
+// AddMessage appends one transcript row to a session.
 func (s *Store) AddMessage(ctx context.Context, sessionID int64, role, content string) error {
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO messages (session_id, role, content, created_at)
@@ -493,10 +609,294 @@ VALUES (?, ?, ?, ?)`,
 	return err
 }
 
+// UpdateSessionResponse updates the latest response snapshot on a session.
+func (s *Store) UpdateSessionResponse(ctx context.Context, sessionID int64, response string) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE sessions
+SET response = ?
+WHERE id = ?`, response, sessionID)
+	return err
+}
+
+// InsertMultiAgentTrace inserts one structured child-agent trajectory step.
+func (s *Store) InsertMultiAgentTrace(ctx context.Context, record MultiAgentTraceRecord) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO multiagent_traces (
+    username, parent_session_id, child_session_id, task_id, iteration, type, tool,
+    input_json, output_json, error, note, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		record.Username,
+		record.ParentSessionID,
+		record.ChildSessionID,
+		record.TaskID,
+		record.Iteration,
+		record.Type,
+		record.Tool,
+		record.InputJSON,
+		record.OutputJSON,
+		record.Error,
+		record.Note,
+		time.Now().UTC().Format(time.RFC3339),
+	)
+	return err
+}
+
+// ListMultiAgentTraces returns stored child-agent trajectory steps.
+func (s *Store) ListMultiAgentTraces(ctx context.Context, filters MultiAgentTraceFilters) ([]MultiAgentTraceRecord, error) {
+	if filters.Limit <= 0 {
+		filters.Limit = 50
+	}
+	if filters.Offset < 0 {
+		filters.Offset = 0
+	}
+	query := `
+SELECT id, username, parent_session_id, child_session_id, task_id, iteration, type, tool,
+       input_json, output_json, error, note, created_at
+FROM multiagent_traces
+WHERE 1=1`
+	args := make([]any, 0, 8)
+	if filters.Username != "" {
+		query += ` AND username = ?`
+		args = append(args, filters.Username)
+	}
+	if filters.ParentSessionID > 0 {
+		query += ` AND parent_session_id = ?`
+		args = append(args, filters.ParentSessionID)
+	}
+	if filters.ChildSessionID > 0 {
+		query += ` AND child_session_id = ?`
+		args = append(args, filters.ChildSessionID)
+	}
+	if filters.TaskID != "" {
+		query += ` AND task_id = ?`
+		args = append(args, filters.TaskID)
+	}
+	if !filters.FromTime.IsZero() {
+		query += ` AND created_at >= ?`
+		args = append(args, filters.FromTime.UTC().Format(time.RFC3339))
+	}
+	if !filters.ToTime.IsZero() {
+		query += ` AND created_at <= ?`
+		args = append(args, filters.ToTime.UTC().Format(time.RFC3339))
+	}
+	query += ` ORDER BY id ASC LIMIT ? OFFSET ?`
+	args = append(args, filters.Limit, filters.Offset)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []MultiAgentTraceRecord
+	for rows.Next() {
+		var record MultiAgentTraceRecord
+		var createdAt string
+		if err := rows.Scan(
+			&record.ID,
+			&record.Username,
+			&record.ParentSessionID,
+			&record.ChildSessionID,
+			&record.TaskID,
+			&record.Iteration,
+			&record.Type,
+			&record.Tool,
+			&record.InputJSON,
+			&record.OutputJSON,
+			&record.Error,
+			&record.Note,
+			&createdAt,
+		); err != nil {
+			return nil, err
+		}
+		record.CreatedAt, err = time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
+// ListMultiAgentTraceFailures returns only trace rows that contain execution errors.
+func (s *Store) ListMultiAgentTraceFailures(ctx context.Context, filters MultiAgentTraceFilters) ([]MultiAgentTraceRecord, error) {
+	if filters.Limit <= 0 {
+		filters.Limit = 50
+	}
+	if filters.Offset < 0 {
+		filters.Offset = 0
+	}
+	query := `
+SELECT id, username, parent_session_id, child_session_id, task_id, iteration, type, tool,
+       input_json, output_json, error, note, created_at
+FROM multiagent_traces
+WHERE error <> ''`
+	args := make([]any, 0, 8)
+	if filters.Username != "" {
+		query += ` AND username = ?`
+		args = append(args, filters.Username)
+	}
+	if filters.ParentSessionID > 0 {
+		query += ` AND parent_session_id = ?`
+		args = append(args, filters.ParentSessionID)
+	}
+	if filters.ChildSessionID > 0 {
+		query += ` AND child_session_id = ?`
+		args = append(args, filters.ChildSessionID)
+	}
+	if filters.TaskID != "" {
+		query += ` AND task_id = ?`
+		args = append(args, filters.TaskID)
+	}
+	if !filters.FromTime.IsZero() {
+		query += ` AND created_at >= ?`
+		args = append(args, filters.FromTime.UTC().Format(time.RFC3339))
+	}
+	if !filters.ToTime.IsZero() {
+		query += ` AND created_at <= ?`
+		args = append(args, filters.ToTime.UTC().Format(time.RFC3339))
+	}
+	query += ` ORDER BY id DESC LIMIT ? OFFSET ?`
+	args = append(args, filters.Limit, filters.Offset)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []MultiAgentTraceRecord
+	for rows.Next() {
+		var record MultiAgentTraceRecord
+		var createdAt string
+		if err := rows.Scan(
+			&record.ID, &record.Username, &record.ParentSessionID, &record.ChildSessionID,
+			&record.TaskID, &record.Iteration, &record.Type, &record.Tool,
+			&record.InputJSON, &record.OutputJSON, &record.Error, &record.Note, &createdAt,
+		); err != nil {
+			return nil, err
+		}
+		record.CreatedAt, err = time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
+// SummarizeMultiAgentTraces returns grouped counts and failure totals for traces.
+func (s *Store) SummarizeMultiAgentTraces(ctx context.Context, filters MultiAgentTraceFilters) ([]MultiAgentTraceSummary, error) {
+	query := `
+SELECT tool, type, COUNT(*) AS total,
+       SUM(CASE WHEN error <> '' THEN 1 ELSE 0 END) AS failures,
+       MAX(created_at) AS last_seen_at,
+       MAX(CASE WHEN error <> '' THEN error ELSE '' END) AS last_error
+FROM multiagent_traces
+WHERE 1=1`
+	args := make([]any, 0, 8)
+	if filters.Username != "" {
+		query += ` AND username = ?`
+		args = append(args, filters.Username)
+	}
+	if filters.ParentSessionID > 0 {
+		query += ` AND parent_session_id = ?`
+		args = append(args, filters.ParentSessionID)
+	}
+	if filters.ChildSessionID > 0 {
+		query += ` AND child_session_id = ?`
+		args = append(args, filters.ChildSessionID)
+	}
+	if filters.TaskID != "" {
+		query += ` AND task_id = ?`
+		args = append(args, filters.TaskID)
+	}
+	if !filters.FromTime.IsZero() {
+		query += ` AND created_at >= ?`
+		args = append(args, filters.FromTime.UTC().Format(time.RFC3339))
+	}
+	if !filters.ToTime.IsZero() {
+		query += ` AND created_at <= ?`
+		args = append(args, filters.ToTime.UTC().Format(time.RFC3339))
+	}
+	query += ` GROUP BY tool, type ORDER BY failures DESC, total DESC, tool ASC, type ASC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var summaries []MultiAgentTraceSummary
+	for rows.Next() {
+		var summary MultiAgentTraceSummary
+		if err := rows.Scan(&summary.Tool, &summary.Type, &summary.Total, &summary.Failures, &summary.LastSeenAt, &summary.LastError); err != nil {
+			return nil, err
+		}
+		summaries = append(summaries, summary)
+	}
+	return summaries, rows.Err()
+}
+
+// ListMultiAgentTraceHotspots returns task-level trace hotspots ordered by failures.
+func (s *Store) ListMultiAgentTraceHotspots(ctx context.Context, filters MultiAgentTraceFilters) ([]MultiAgentTraceHotspot, error) {
+	query := `
+SELECT parent_session_id, child_session_id, task_id,
+       COUNT(*) AS total,
+       SUM(CASE WHEN error <> '' THEN 1 ELSE 0 END) AS failures
+FROM multiagent_traces
+WHERE 1=1`
+	args := make([]any, 0, 8)
+	if filters.Username != "" {
+		query += ` AND username = ?`
+		args = append(args, filters.Username)
+	}
+	if filters.ParentSessionID > 0 {
+		query += ` AND parent_session_id = ?`
+		args = append(args, filters.ParentSessionID)
+	}
+	if filters.ChildSessionID > 0 {
+		query += ` AND child_session_id = ?`
+		args = append(args, filters.ChildSessionID)
+	}
+	if filters.TaskID != "" {
+		query += ` AND task_id = ?`
+		args = append(args, filters.TaskID)
+	}
+	if !filters.FromTime.IsZero() {
+		query += ` AND created_at >= ?`
+		args = append(args, filters.FromTime.UTC().Format(time.RFC3339))
+	}
+	if !filters.ToTime.IsZero() {
+		query += ` AND created_at <= ?`
+		args = append(args, filters.ToTime.UTC().Format(time.RFC3339))
+	}
+	query += ` GROUP BY parent_session_id, child_session_id, task_id
+ORDER BY failures DESC, total DESC, child_session_id DESC`
+	if filters.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, filters.Limit)
+		if filters.Offset > 0 {
+			query += ` OFFSET ?`
+			args = append(args, filters.Offset)
+		}
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var hotspots []MultiAgentTraceHotspot
+	for rows.Next() {
+		var hotspot MultiAgentTraceHotspot
+		if err := rows.Scan(&hotspot.ParentSessionID, &hotspot.ChildSessionID, &hotspot.TaskID, &hotspot.Total, &hotspot.Failures); err != nil {
+			return nil, err
+		}
+		hotspots = append(hotspots, hotspot)
+	}
+	return hotspots, rows.Err()
+}
+
+// GetMessages returns all messages for a session.
 func (s *Store) GetMessages(ctx context.Context, sessionID int64) ([]Message, error) {
 	return s.GetMessagesPage(ctx, sessionID, 0, 0)
 }
 
+// GetMessagesPage returns session messages using pagination.
 func (s *Store) GetMessagesPage(ctx context.Context, sessionID int64, limit, offset int) ([]Message, error) {
 	query := `
 SELECT id, session_id, role, content, created_at
@@ -533,6 +933,7 @@ LIMIT ? OFFSET ?`
 	return messages, rows.Err()
 }
 
+// ListRecentMessagesByUsername returns the latest messages across a user's sessions.
 func (s *Store) ListRecentMessagesByUsername(ctx context.Context, username string, limit int) ([]Message, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -570,6 +971,7 @@ LIMIT ?`, username, limit)
 	return messages, nil
 }
 
+// ListRecentMessagesBySession returns the latest messages inside one session.
 func (s *Store) ListRecentMessagesBySession(ctx context.Context, sessionID int64, limit int) ([]Message, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -606,6 +1008,7 @@ LIMIT ?`, sessionID, limit)
 	return messages, nil
 }
 
+// SearchMessages runs FTS-backed history search with optional filters.
 func (s *Store) SearchMessages(ctx context.Context, filters SearchFilters) ([]SearchResult, error) {
 	query := normalizeFTSQuery(filters.Query)
 	if filters.Limit <= 0 {
@@ -685,6 +1088,7 @@ LIMIT ?`
 	return results, rows.Err()
 }
 
+// MarkGatewayUpdateProcessed deduplicates gateway updates by provider and external ID.
 func (s *Store) MarkGatewayUpdateProcessed(ctx context.Context, provider, externalID string) (bool, error) {
 	result, err := s.db.ExecContext(ctx, `
 INSERT OR IGNORE INTO processed_gateway_updates (provider, external_id, created_at)

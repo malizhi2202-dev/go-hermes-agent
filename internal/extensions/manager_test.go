@@ -2,14 +2,17 @@ package extensions
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
-	"go-hermes-agent/internal/config"
-	"go-hermes-agent/internal/tools"
+	"hermes-agent/go/internal/config"
+	"hermes-agent/go/internal/tools"
 )
 
 func TestManagerDiscoversAndRegistersPluginAndSkillTools(t *testing.T) {
@@ -219,6 +222,102 @@ while True:
 	}
 	first, ok := content[0].(map[string]any)
 	if !ok || first["text"] != "mcp:gamma" {
+		t.Fatalf("unexpected mcp text: %#v", content[0])
+	}
+}
+
+func TestMCPHTTPServerDiscoveryAndExecution(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		method, _ := req["method"].(string)
+		response := map[string]any{
+			"jsonrpc": "2.0",
+			"id":      req["id"],
+			"result":  map[string]any{},
+		}
+		switch method {
+		case "initialize":
+			response["result"] = map[string]any{"capabilities": map[string]any{"tools": map[string]any{}}}
+		case "notifications/initialized":
+			response["result"] = map[string]any{}
+		case "tools/list":
+			response["result"] = map[string]any{
+				"tools": []map[string]any{
+					{
+						"name":        "echo",
+						"description": "Echo tool",
+						"inputSchema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"text": map[string]any{"type": "string"},
+							},
+						},
+					},
+				},
+			}
+		case "tools/call":
+			params, _ := req["params"].(map[string]any)
+			args, _ := params["arguments"].(map[string]any)
+			response["result"] = map[string]any{
+				"content": []map[string]any{
+					{"type": "text", "text": "mcp:http:" + stringValue(args["text"], "")},
+				},
+			}
+		default:
+			response["error"] = map[string]any{"code": -32601, "message": "method not found"}
+			delete(response, "result")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	defer server.Close()
+
+	cfg := config.Default()
+	cfg.MCPServers = map[string]config.MCPServerConfig{
+		"helper_http": {
+			Enabled:        true,
+			Transport:      "http",
+			URL:            server.URL,
+			TimeoutSeconds: 5,
+		},
+	}
+	manager := NewManager(cfg, nil, nil, nil)
+	if err := manager.Discover(context.Background()); err != nil {
+		t.Fatalf("discover extensions: %v", err)
+	}
+	summary := manager.Summary()
+	if len(summary.MCP) != 1 || !summary.MCP[0].Discovered || len(summary.MCP[0].Tools) != 1 {
+		t.Fatalf("unexpected mcp summary: %+v", summary.MCP)
+	}
+	if summary.MCP[0].Transport != "http" || summary.MCP[0].URL != server.URL {
+		t.Fatalf("unexpected mcp transport summary: %+v", summary.MCP[0])
+	}
+	registry := tools.New()
+	if err := manager.Register(registry); err != nil {
+		t.Fatalf("register mcp tools: %v", err)
+	}
+	result, err := registry.Execute(context.Background(), "mcp.helper_http.echo", map[string]any{
+		"username": "admin",
+		"text":     "delta",
+	})
+	if err != nil {
+		t.Fatalf("execute mcp tool: %v", err)
+	}
+	raw, ok := result["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected mcp result: %#v", result)
+	}
+	content, ok := raw["content"].([]any)
+	if !ok || len(content) != 1 {
+		t.Fatalf("unexpected mcp content: %#v", raw)
+	}
+	first, ok := content[0].(map[string]any)
+	if !ok || first["text"] != "mcp:http:delta" {
 		t.Fatalf("unexpected mcp text: %#v", content[0])
 	}
 }

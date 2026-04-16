@@ -10,11 +10,12 @@ import (
 	"sort"
 	"strings"
 
-	"go-hermes-agent/internal/config"
+	"hermes-agent/go/internal/config"
 )
 
 const entryDelimiter = "\n§\n"
 
+// FileProvider is the built-in file-backed memory provider.
 type FileProvider struct {
 	root            string
 	memoryCharLimit int
@@ -22,6 +23,7 @@ type FileProvider struct {
 	recallLimit     int
 }
 
+// NewFileProvider creates the built-in file-backed memory provider.
 func NewFileProvider(cfg config.Config) *FileProvider {
 	return &FileProvider{
 		root:            filepath.Join(cfg.DataDir, "memories"),
@@ -31,8 +33,10 @@ func NewFileProvider(cfg config.Config) *FileProvider {
 	}
 }
 
+// Name returns the provider identifier.
 func (p *FileProvider) Name() string { return "builtin" }
 
+// Prefetch recalls relevant memory snippets for the next prompt.
 func (p *FileProvider) Prefetch(_ context.Context, username, query string) (string, error) {
 	snapshot, err := p.Read(context.Background(), username)
 	if err != nil {
@@ -77,10 +81,12 @@ func (p *FileProvider) Prefetch(_ context.Context, username, query string) (stri
 	return strings.Join(lines, "\n"), nil
 }
 
+// SyncTurn is currently a no-op for the file-backed provider.
 func (p *FileProvider) SyncTurn(_ context.Context, _ string, _, _ string) error {
 	return nil
 }
 
+// Read returns the current memory snapshot for a user.
 func (p *FileProvider) Read(_ context.Context, username string) (Snapshot, error) {
 	if err := os.MkdirAll(p.userDir(username), 0o755); err != nil {
 		return Snapshot{}, err
@@ -91,6 +97,7 @@ func (p *FileProvider) Read(_ context.Context, username string) (Snapshot, error
 	}, nil
 }
 
+// Write mutates one memory target and returns the updated snapshot.
 func (p *FileProvider) Write(_ context.Context, username, target, action, content, match string) (Snapshot, error) {
 	path, limit, err := p.resolveTarget(username, target)
 	if err != nil {
