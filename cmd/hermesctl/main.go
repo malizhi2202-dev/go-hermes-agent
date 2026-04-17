@@ -352,12 +352,11 @@ func runChat(args []string) {
 	cfg, application := mustApp(*configPath)
 	defer application.Close()
 
-	chatUser, err := authenticateChatUser(context.Background(), application, strings.TrimSpace(*username), *password, strings.TrimSpace(*token))
-	if err != nil {
-		log.Fatalf("chat auth: %v", err)
-	}
-
 	if text := strings.TrimSpace(*prompt); text != "" {
+		chatUser, err := authenticateChatUser(context.Background(), application, strings.TrimSpace(*username), *password, strings.TrimSpace(*token))
+		if err != nil {
+			log.Fatalf("chat auth: %v", err)
+		}
 		reply, err := application.Chat(context.Background(), chatUser, text)
 		if err != nil {
 			log.Fatalf("chat failed: %v", err)
@@ -367,6 +366,10 @@ func runChat(args []string) {
 	}
 
 	if piped := strings.TrimSpace(readAllFromStdin()); piped != "" {
+		chatUser, err := authenticateChatUser(context.Background(), application, strings.TrimSpace(*username), *password, strings.TrimSpace(*token))
+		if err != nil {
+			log.Fatalf("chat auth: %v", err)
+		}
 		reply, err := application.Chat(context.Background(), chatUser, piped)
 		if err != nil {
 			log.Fatalf("chat failed: %v", err)
@@ -375,37 +378,13 @@ func runChat(args []string) {
 		return
 	}
 
-	current := cfg.ResolvedLLM()
-	fmt.Printf("chat session started as %q with model %q\n", chatUser, current.Model)
-	fmt.Println("type /exit or /quit to leave")
 	reader := bufio.NewReader(os.Stdin)
-	for {
-		fmt.Print("you> ")
-		line, err := reader.ReadString('\n')
-		if err != nil && err != io.EOF {
-			log.Fatalf("read prompt: %v", err)
-		}
-		text := strings.TrimSpace(line)
-		if text == "" {
-			if err == io.EOF {
-				fmt.Println("")
-				return
-			}
-			continue
-		}
-		if text == "/exit" || text == "/quit" {
-			return
-		}
-		reply, chatErr := application.Chat(context.Background(), chatUser, text)
-		if chatErr != nil {
-			fmt.Printf("assistant> error: %v\n", chatErr)
-		} else {
-			fmt.Printf("assistant> %s\n", reply)
-		}
-		if err == io.EOF {
-			return
-		}
+	chatUser, err := ensureConsoleUser(context.Background(), application, reader, os.Stdout, strings.TrimSpace(*username), *password, strings.TrimSpace(*token))
+	if err != nil {
+		log.Fatalf("chat auth: %v", err)
 	}
+	console := newInteractiveConsole(*configPath, cfg, application, reader, os.Stdout, chatUser)
+	console.Start(context.Background())
 }
 
 func runContext(args []string) {

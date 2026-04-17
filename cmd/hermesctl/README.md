@@ -19,6 +19,35 @@
 - 扩展与工具：`extensions`、`extension-hooks`、`extension-refresh`、`extension-state`、`extension-validate`、`tools`、`tool-exec`
 - 多 Agent：`multiagent-plan`、`multiagent-run`、`multiagent-traces`、`multiagent-summary`、`multiagent-verifiers`、`multiagent-failures`、`multiagent-hotspots`、`multiagent-replay`、`multiagent-resume`
 
+统一交互式控制台：
+
+- `hermesctl chat` 在交互模式下现在不只是聊天页，也是一体化控制台
+- 普通文本输入继续走聊天
+- slash commands 现在支持：
+  - `/login`
+  - `/whoami`
+  - `/models`
+  - `/model`
+  - `/context`
+  - `/sessions`
+  - `/history`
+  - `/search`
+  - `/audit`
+  - `/extensions`
+  - `/tools`
+  - `/multiagent-plan`
+  - `/multiagent-run`
+  - `/multiagent-replay`
+  - `/trajectories`
+  - `/trajectory-summary`
+  - `/cron-add`
+  - `/cron-list`
+  - `/cron-show`
+  - `/cron-delete`
+  - `/cron-tick`
+  - `/help`
+  - `/exit`
+
 方案说明：
 
 - 参数解析使用标准库 `flag`，减少依赖和学习成本。
@@ -29,3 +58,4 @@
 - `batch-run --resume` 通过 run name 对应的 checkpoint 文件继续处理，适合单机长任务恢复。
 - `trajectories` 和 `trajectory-summary` 支持轻量过滤，便于直接在 CLI 里做排障和数据盘点。
 - cron 相关命令采用 JSON 文件持久化和显式 `tick`，既能让 hermesd 后台自动调度，也方便通过 CLI 手动排障。
+- 统一交互控制台让最常见的管理动作可以在同一个登录态里完成，减少反复输入长命令的成本。

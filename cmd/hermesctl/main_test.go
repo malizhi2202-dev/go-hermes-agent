@@ -53,6 +53,39 @@ func TestParseOptionalBoolPointer(t *testing.T) {
 	}
 }
 
+func TestSplitCommandAndRest(t *testing.T) {
+	command, rest := splitCommandAndRest("search gateway status")
+	if command != "search" || rest != "gateway status" {
+		t.Fatalf("unexpected split result: command=%q rest=%q", command, rest)
+	}
+	command, rest = splitCommandAndRest("help")
+	if command != "help" || rest != "" {
+		t.Fatalf("unexpected single token split: command=%q rest=%q", command, rest)
+	}
+}
+
+func TestSplitAroundDoubleDash(t *testing.T) {
+	left, right, ok := splitAroundDoubleDash("tasks.json -- inspect gateway")
+	if !ok || left != "tasks.json" || right != "inspect gateway" {
+		t.Fatalf("unexpected split around double dash: ok=%v left=%q right=%q", ok, left, right)
+	}
+	if _, _, ok := splitAroundDoubleDash("tasks.json inspect gateway"); ok {
+		t.Fatal("expected missing separator to fail")
+	}
+}
+
+func TestParsePositiveIntDefault(t *testing.T) {
+	if got := parsePositiveIntDefault("12", 5); got != 12 {
+		t.Fatalf("unexpected parsed int: %d", got)
+	}
+	if got := parsePositiveIntDefault("bad", 5); got != 5 {
+		t.Fatalf("unexpected fallback for bad input: %d", got)
+	}
+	if got := parsePositiveIntDefault("", 5); got != 5 {
+		t.Fatalf("unexpected fallback for empty input: %d", got)
+	}
+}
+
 func TestLoadTasksFileSupportsArrayAndWrapper(t *testing.T) {
 	dir := t.TempDir()
 	arrayFile := filepath.Join(dir, "tasks-array.json")

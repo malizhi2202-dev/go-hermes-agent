@@ -146,9 +146,6 @@ func (c *Client) ChatWithMessages(ctx context.Context, systemBlocks []string, hi
 // includes native tool definitions for OpenAI-compatible tool-calling.
 func (c *Client) ChatCompletion(ctx context.Context, systemBlocks []string, history []message, prompt string, toolDefs []ToolDefinition) (ChatCompletion, error) {
 	apiKey := strings.TrimSpace(c.cfg.APIKey)
-	if apiKey == "" {
-		return ChatCompletion{}, fmt.Errorf("missing API key env %q", c.cfg.APIKey)
-	}
 	messages := []message{{Role: "system", Content: "You are a secure, concise assistant."}}
 	for _, block := range systemBlocks {
 		block = strings.TrimSpace(block)

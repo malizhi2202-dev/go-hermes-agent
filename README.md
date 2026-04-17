@@ -213,6 +213,18 @@ go build -o bin/hermesctl ./cmd/hermesctl
 ./bin/hermesd --config ./configs/config.example.yaml
 ```
 
+`hermesctl chat` 现在已经升级成统一交互式 CLI 控制台：
+
+- 普通输入直接对话
+- `/help` 查看控制台命令
+- `/login` 在控制台里切换账号
+- `/sessions`、`/history`、`/search`、`/audit` 做会话和排障
+- `/models`、`/model` 做模型查看和切换
+- `/extensions`、`/tools` 做扩展和工具治理
+- `/multiagent-plan`、`/multiagent-run`、`/multiagent-replay` 做多 Agent 操作
+- `/trajectories`、`/trajectory-summary` 做轨迹查看
+- `/cron-add`、`/cron-list`、`/cron-tick` 做轻量调度管理
+
 `hermesctl` 现在不只是登录和对话入口，也覆盖了大部分原 Web/API 运维面：
 
 - prompt 观测：`prompt-inspect` / `prompt-cache-stats` / `prompt-cache-clear` / `prompt-config`
