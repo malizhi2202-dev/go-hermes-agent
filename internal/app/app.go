@@ -178,6 +178,9 @@ func New(cfg config.Config) (*App, error) {
 		ListRecent: func(ctx context.Context, username string, limit int) ([]store.Message, error) {
 			return application.Store.ListRecentMessagesByUsername(ctx, username, limit)
 		},
+		ListRecentBySession: func(ctx context.Context, sessionID int64, limit int) ([]store.Message, error) {
+			return application.Store.ListRecentMessagesBySession(ctx, sessionID, limit)
+		},
 		Compress: func(ctx context.Context, existingSummary string, history []llm.Message) contextengine.Result {
 			return application.Compressor.Compress(ctx, existingSummary, history)
 		},
@@ -285,6 +288,19 @@ func (a *App) Chat(ctx context.Context, username, prompt string) (string, error)
 
 // ChatDetailed runs one authenticated chat turn and returns the session-linked result.
 func (a *App) ChatDetailed(ctx context.Context, username, prompt string) (ChatResult, error) {
+	return a.chatDetailed(ctx, username, 0, prompt, false)
+}
+
+// ChatInSessionDetailed appends a chat turn to one existing session using
+// session-scoped recent history instead of username-wide recent history.
+func (a *App) ChatInSessionDetailed(ctx context.Context, username string, sessionID int64, prompt string) (ChatResult, error) {
+	if sessionID <= 0 {
+		return ChatResult{}, fmt.Errorf("session_id must be positive")
+	}
+	return a.chatDetailed(ctx, username, sessionID, prompt, true)
+}
+
+func (a *App) chatDetailed(ctx context.Context, username string, sessionID int64, prompt string, reuseSession bool) (ChatResult, error) {
 	a.mu.RLock()
 	client := a.LLM
 	model := a.Config.ResolvedLLM().Model
@@ -292,6 +308,7 @@ func (a *App) ChatDetailed(ctx context.Context, username, prompt string) (ChatRe
 	mem := a.Memory
 	input := prompting.BuildInput{
 		Username:           username,
+		SessionID:          sessionID,
 		Prompt:             prompt,
 		Model:              model,
 		HistoryWindow:      a.Config.Context.HistoryWindowMessages,
@@ -311,22 +328,40 @@ func (a *App) ChatDetailed(ctx context.Context, username, prompt string) (ChatRe
 	if err != nil {
 		return ChatResult{}, err
 	}
-	sessionID, err := a.Store.CreateSession(ctx, username, model, prompt, response)
-	if err != nil {
+	targetSessionID := sessionID
+	if reuseSession {
+		session, err := a.Store.GetSession(ctx, sessionID)
+		if err != nil {
+			return ChatResult{}, err
+		}
+		if session.Username != username {
+			return ChatResult{}, fmt.Errorf("session %d does not belong to %s", sessionID, username)
+		}
+		if err := a.Store.UpdateSessionResponse(ctx, sessionID, response); err != nil {
+			return ChatResult{}, err
+		}
+	} else {
+		targetSessionID, err = a.Store.CreateSession(ctx, username, model, prompt, response)
+		if err != nil {
+			return ChatResult{}, err
+		}
+	}
+	if err := a.Store.AddMessage(ctx, targetSessionID, "user", prompt); err != nil {
 		return ChatResult{}, err
 	}
-	if err := a.Store.AddMessage(ctx, sessionID, "user", prompt); err != nil {
-		return ChatResult{}, err
-	}
-	if err := a.Store.AddMessage(ctx, sessionID, "assistant", response); err != nil {
+	if err := a.Store.AddMessage(ctx, targetSessionID, "assistant", response); err != nil {
 		return ChatResult{}, err
 	}
 	if err := mem.SyncTurn(ctx, username, prompt, response); err != nil {
 		return ChatResult{}, err
 	}
-	_ = a.Store.WriteAudit(ctx, username, "chat", fmt.Sprintf("session recorded cache_hit=%t", plan.CacheHit))
+	action := "chat"
+	if reuseSession {
+		action = "chat_resume"
+	}
+	_ = a.Store.WriteAudit(ctx, username, action, fmt.Sprintf("session recorded cache_hit=%t", plan.CacheHit))
 	return ChatResult{
-		SessionID: sessionID,
+		SessionID: targetSessionID,
 		Model:     model,
 		Prompt:    prompt,
 		Response:  response,
@@ -402,6 +437,32 @@ func (a *App) AuxiliaryChat(ctx context.Context, task, prompt string) (string, l
 	router := a.Auxiliary
 	a.mu.RUnlock()
 	return router.Chat(ctx, task, []string{"You are a lightweight auxiliary assistant for Hermes-Go."}, prompt)
+}
+
+// SwitchAuxiliaryProfile changes the configured auxiliary model profile for one task lane.
+func (a *App) SwitchAuxiliaryProfile(ctx context.Context, username, task, profile string) (config.AuxiliaryConfig, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	profile = strings.TrimSpace(profile)
+	if profile == "" {
+		return config.AuxiliaryConfig{}, fmt.Errorf("profile is required")
+	}
+	if _, ok := a.Config.ModelProfiles[profile]; !ok {
+		return config.AuxiliaryConfig{}, fmt.Errorf("profile %q is not defined", profile)
+	}
+	switch strings.ToLower(strings.TrimSpace(task)) {
+	case "", "default":
+		a.Config.Auxiliary.Profile = profile
+		task = "default"
+	case "summary":
+		a.Config.Auxiliary.SummaryProfile = profile
+	case "compression":
+		a.Config.Auxiliary.CompressionProfile = profile
+	default:
+		return config.AuxiliaryConfig{}, fmt.Errorf("task must be one of: default, summary, compression")
+	}
+	_ = a.Store.WriteAudit(ctx, username, "auxiliary_switch", fmt.Sprintf("task=%s profile=%s", task, profile))
+	return a.Config.Auxiliary, nil
 }
 
 // CurrentModelMetadata returns lightweight provider-aware metadata for the active model.

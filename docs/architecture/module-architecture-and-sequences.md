@@ -17,7 +17,8 @@
 - 管理员初始化
 - 登录与 token 获取
 - 模型查看、发现、切换
-- CLI 单轮或交互式对话
+- 统一交互式控制台
+- 会话/审计/轨迹/多 Agent 运维入口
 
 ### 架构图
 
@@ -47,6 +48,7 @@ sequenceDiagram
 
 - 把运维和交互都放到 CLI，符合轻量版目标
 - 用户不需要先启动 Web UI 才能完成基本管理
+- 先把 Python 版高频工作流命令迁到 `hermesctl chat`，再逐步补富交互体验
 
 ### Python 对应
 
@@ -54,6 +56,12 @@ sequenceDiagram
 - `hermes_cli/main.py`
 - `hermes_cli/model_switch.py`
 - `hermes_cli/models.py`
+
+### 当前 Go 控制台状态
+
+- `hermesctl chat` 现在不仅能直接聊天，也承载了 `/status`、`/usage`、`/insights`、`/resume`、`/retry`、`/undo`、`/tool-exec`、`/multiagent-resume` 等控制命令。
+- `/resume` 现在已经支持第一版 session-scoped 持续对话：恢复后普通输入会继续写入该 session，并优先读取该 session 的最近历史。
+- 默认普通聊天现在也已经采用控制台内持续会话；`/new`、`/clear` 和 `/resume` 则负责切换当前工作 session。
 
 ---
 

@@ -1,14 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"go-hermes-agent/internal/config"
 	"go-hermes-agent/internal/multiagent"
 	"go-hermes-agent/internal/store"
 )
@@ -83,6 +87,94 @@ func TestParsePositiveIntDefault(t *testing.T) {
 	}
 	if got := parsePositiveIntDefault("", 5); got != 5 {
 		t.Fatalf("unexpected fallback for empty input: %d", got)
+	}
+}
+
+func TestParseConsoleFlagArgs(t *testing.T) {
+	fs := flag.NewFlagSet("console", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	limit := fs.Int("limit", 50, "record limit")
+	offset := fs.Int("offset", 0, "record offset")
+	if err := parseConsoleFlagArgs(fs, "--limit 12 --offset 3"); err != nil {
+		t.Fatalf("parse console flags: %v", err)
+	}
+	if *limit != 12 || *offset != 3 {
+		t.Fatalf("unexpected parsed values: limit=%d offset=%d", *limit, *offset)
+	}
+}
+
+func TestParseConsoleTraceFilters(t *testing.T) {
+	filters, err := parseConsoleTraceFilters("--parent-session-id 11 --child-session-id 12 --task-id gateway --from 2026-04-17T08:00:00Z --to 2026-04-17T10:00:00Z --limit 7 --offset 3", 50)
+	if err != nil {
+		t.Fatalf("parse trace filters: %v", err)
+	}
+	if filters.ParentSessionID != 11 || filters.ChildSessionID != 12 || filters.TaskID != "gateway" || filters.Limit != 7 || filters.Offset != 3 {
+		t.Fatalf("unexpected trace filters: %#v", filters)
+	}
+	if filters.FromTime.Format(time.RFC3339) != "2026-04-17T08:00:00Z" || filters.ToTime.Format(time.RFC3339) != "2026-04-17T10:00:00Z" {
+		t.Fatalf("unexpected trace filter times: %#v", filters)
+	}
+}
+
+func TestParseToolExecInput(t *testing.T) {
+	name, input, err := parseToolExecInput(`system.exec -- {"command":"echo","args":["hello"]}`)
+	if err != nil {
+		t.Fatalf("parse tool exec input: %v", err)
+	}
+	if name != "system.exec" {
+		t.Fatalf("unexpected tool name: %q", name)
+	}
+	if input["command"] != "echo" {
+		t.Fatalf("unexpected command input: %#v", input)
+	}
+	args, ok := input["args"].([]any)
+	if !ok || len(args) != 1 || args[0] != "hello" {
+		t.Fatalf("unexpected args input: %#v", input["args"])
+	}
+}
+
+func TestInteractiveConsoleHelpIncludesMigratedCommands(t *testing.T) {
+	var out bytes.Buffer
+	console := newInteractiveConsole("", config.Config{}, nil, bufio.NewReader(strings.NewReader("")), &out, "alice")
+	console.printHelp()
+	help := out.String()
+	wantSnippets := []string{
+		"/new",
+		"/clear",
+		"/status",
+		"/usage",
+		"/insights [days]",
+		"/prompt-inspect <prompt>",
+		"/prompt-cache-stats",
+		"/prompt-cache-clear",
+		"/prompt-config",
+		"/resume [session-id]",
+		"/discover-models",
+		"/model-metadata [profile-or-alias]",
+		"/auxiliary-info [task]",
+		"/auxiliary-chat [task] -- <prompt>",
+		"/auxiliary-switch <profile> [default|summary|compression]",
+		"/extension-hooks [--kind <kind>] [--name <name>] [--phase <phase>] [--limit n] [--offset n]",
+		"/extension-refresh",
+		"/extension-state --kind <kind> --name <name> --enabled <true|false>",
+		"/extension-validate --kind <kind> --name <name>",
+		"/retry",
+		"/undo",
+		"/tool-exec <tool-name> [-- <json-object>]",
+		"/execution-audit [--limit n] [--offset n]",
+		"/execution-profile-audit [--from <rfc3339>] [--to <rfc3339>]",
+		"/multiagent-traces [--parent-session-id n] [--child-session-id n] [--task-id <id>] [--from <rfc3339>] [--to <rfc3339>] [--limit n] [--offset n]",
+		"/multiagent-summary [--parent-session-id n] [--child-session-id n] [--task-id <id>] [--from <rfc3339>] [--to <rfc3339>]",
+		"/multiagent-verifiers [--parent-session-id n] [--child-session-id n] [--task-id <id>] [--from <rfc3339>] [--to <rfc3339>]",
+		"/multiagent-failures [--parent-session-id n] [--child-session-id n] [--task-id <id>] [--from <rfc3339>] [--to <rfc3339>] [--limit n] [--offset n]",
+		"/multiagent-hotspots [--parent-session-id n] [--child-session-id n] [--task-id <id>] [--from <rfc3339>] [--to <rfc3339>] [--limit n] [--offset n]",
+		"/multiagent-resume <child-session-id> [--allowed-tools a,b] [--history-window n]",
+		"/trajectory-show <trajectory-id>",
+	}
+	for _, snippet := range wantSnippets {
+		if !strings.Contains(help, snippet) {
+			t.Fatalf("expected help to contain %q, got:\n%s", snippet, help)
+		}
 	}
 }
 

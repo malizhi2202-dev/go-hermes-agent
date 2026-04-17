@@ -360,6 +360,118 @@ func TestInspectPromptAndPromptCache(t *testing.T) {
 	}
 }
 
+func TestChatInSessionDetailedUsesSessionScopedHistoryAndAppendsToExistingSession(t *testing.T) {
+	callCount := 0
+	var capturedMessages []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		callCount++
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		rawMessages, _ := payload["messages"].([]any)
+		capturedMessages = make([]map[string]any, 0, len(rawMessages))
+		for _, item := range rawMessages {
+			msg, ok := item.(map[string]any)
+			if ok {
+				capturedMessages = append(capturedMessages, msg)
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{
+					"finish_reason": "stop",
+					"message": map[string]any{
+						"role":    "assistant",
+						"content": "continued inside resumed session",
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	cfg := config.Default()
+	cfg.DataDir = filepath.Join(t.TempDir(), "data")
+	cfg.CurrentModelProfile = ""
+	cfg.LLM.BaseURL = server.URL
+	cfg.LLM.Model = "test-model"
+	cfg.LLM.APIKey = ""
+	application, err := New(cfg)
+	if err != nil {
+		t.Fatalf("init app: %v", err)
+	}
+	defer application.Close()
+
+	ctx := context.Background()
+	sessionID, err := application.Store.CreateSession(ctx, "admin", "seed-model", "seed prompt", "seed response")
+	if err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	if err := application.Store.AddMessage(ctx, sessionID, "user", "seed prompt"); err != nil {
+		t.Fatalf("seed user message: %v", err)
+	}
+	if err := application.Store.AddMessage(ctx, sessionID, "assistant", "seed response"); err != nil {
+		t.Fatalf("seed assistant message: %v", err)
+	}
+
+	result, err := application.ChatInSessionDetailed(ctx, "admin", sessionID, "continue work")
+	if err != nil {
+		t.Fatalf("chat in session: %v", err)
+	}
+	if result.SessionID != sessionID {
+		t.Fatalf("expected reused session id %d, got %#v", sessionID, result)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected one llm call, got %d", callCount)
+	}
+	if len(capturedMessages) < 4 {
+		t.Fatalf("expected prompt history plus new user prompt, got %#v", capturedMessages)
+	}
+	if got := capturedMessages[0]["role"]; got != "system" {
+		t.Fatalf("expected leading system message, got %#v", capturedMessages)
+	}
+	if got := capturedMessages[1]["content"]; got != "seed prompt" {
+		t.Fatalf("expected resumed session user history, got %#v", capturedMessages)
+	}
+	if got := capturedMessages[2]["content"]; got != "seed response" {
+		t.Fatalf("expected resumed session assistant history, got %#v", capturedMessages)
+	}
+	if got := capturedMessages[3]["content"]; got != "continue work" {
+		t.Fatalf("expected current prompt to be appended after resumed history, got %#v", capturedMessages)
+	}
+
+	messages, err := application.Store.GetMessagesPage(ctx, sessionID, 10, 0)
+	if err != nil {
+		t.Fatalf("list session messages: %v", err)
+	}
+	if len(messages) != 4 {
+		t.Fatalf("expected existing + appended messages, got %#v", messages)
+	}
+	session, err := application.Store.GetSession(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if session.Response != "continued inside resumed session" {
+		t.Fatalf("expected updated session response, got %#v", session)
+	}
+	records, err := application.Store.ListAuditFiltered(ctx, store.AuditFilters{Username: "admin", Limit: 20})
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	foundResumeAudit := false
+	for _, record := range records {
+		if record.Action == "chat_resume" {
+			foundResumeAudit = true
+			break
+		}
+	}
+	if !foundResumeAudit {
+		t.Fatalf("expected chat_resume audit record, got %#v", records)
+	}
+}
+
 func TestAuxiliaryInfoAndModelMetadata(t *testing.T) {
 	cfg := config.Default()
 	cfg.DataDir = filepath.Join(t.TempDir(), "data")
@@ -384,5 +496,40 @@ func TestAuxiliaryInfoAndModelMetadata(t *testing.T) {
 	all := application.ListModelMetadata()
 	if len(all) == 0 {
 		t.Fatal("expected profile metadata")
+	}
+}
+
+func TestSwitchAuxiliaryProfile(t *testing.T) {
+	cfg := config.Default()
+	cfg.DataDir = filepath.Join(t.TempDir(), "data")
+	application, err := New(cfg)
+	if err != nil {
+		t.Fatalf("init app: %v", err)
+	}
+	defer application.Close()
+
+	auxCfg, err := application.SwitchAuxiliaryProfile(context.Background(), "admin", "summary", "openrouter-claude-sonnet")
+	if err != nil {
+		t.Fatalf("switch auxiliary profile: %v", err)
+	}
+	if auxCfg.SummaryProfile != "openrouter-claude-sonnet" {
+		t.Fatalf("unexpected auxiliary config: %#v", auxCfg)
+	}
+	if application.Config.Auxiliary.SummaryProfile != "openrouter-claude-sonnet" {
+		t.Fatalf("expected app config update, got %#v", application.Config.Auxiliary)
+	}
+	records, err := application.Store.ListAuditFiltered(context.Background(), store.AuditFilters{Username: "admin", Limit: 10})
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	found := false
+	for _, record := range records {
+		if record.Action == "auxiliary_switch" && strings.Contains(record.Detail, "task=summary") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected auxiliary_switch audit record, got %#v", records)
 	}
 }

@@ -41,3 +41,47 @@ func TestBuilderBuildAssemblesPromptPlan(t *testing.T) {
 		t.Fatalf("expected cache hit, got %#v", cached)
 	}
 }
+
+func TestBuilderBuildUsesSessionScopedHistoryWhenSessionIDPresent(t *testing.T) {
+	calledUserRecent := false
+	calledSessionRecent := false
+	builder := NewBuilder(Dependencies{
+		PrefetchMemory: func(ctx context.Context, username, prompt string) (string, error) {
+			return "", nil
+		},
+		GetSummary: func(ctx context.Context, username string) (store.ContextSummary, error) {
+			return store.ContextSummary{}, nil
+		},
+		PersistSummary: func(ctx context.Context, username, summary, strategy string) error { return nil },
+		ListRecent: func(ctx context.Context, username string, limit int) ([]store.Message, error) {
+			calledUserRecent = true
+			return []store.Message{{Role: "user", Content: "user history"}}, nil
+		},
+		ListRecentBySession: func(ctx context.Context, sessionID int64, limit int) ([]store.Message, error) {
+			calledSessionRecent = true
+			return []store.Message{{Role: "assistant", Content: "session history"}}, nil
+		},
+		Compress: func(ctx context.Context, existingSummary string, history []llm.Message) contextengine.Result {
+			return contextengine.Result{History: history}
+		},
+	}, nil)
+	result, err := builder.Build(context.Background(), BuildInput{
+		Username:           "alice",
+		SessionID:          42,
+		Prompt:             "continue",
+		Model:              "test-model",
+		HistoryWindow:      8,
+		MaxPromptChars:     1000,
+		SummaryStrategy:    "rule",
+		CompressionEnabled: true,
+	})
+	if err != nil {
+		t.Fatalf("build prompt with session history: %v", err)
+	}
+	if calledUserRecent || !calledSessionRecent {
+		t.Fatalf("unexpected history loader usage: user=%v session=%v", calledUserRecent, calledSessionRecent)
+	}
+	if len(result.History) != 1 || result.History[0].Content != "session history" {
+		t.Fatalf("unexpected session-scoped history: %#v", result.History)
+	}
+}

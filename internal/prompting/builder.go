@@ -15,6 +15,7 @@ import (
 // BuildInput describes the sources needed to assemble one prompt.
 type BuildInput struct {
 	Username             string
+	SessionID            int64
 	Prompt               string
 	Model                string
 	HistoryWindow        int
@@ -46,11 +47,12 @@ type BuildResult struct {
 
 // Dependencies keeps the builder independent from concrete store or memory implementations.
 type Dependencies struct {
-	PrefetchMemory func(ctx context.Context, username, prompt string) (string, error)
-	GetSummary     func(ctx context.Context, username string) (store.ContextSummary, error)
-	PersistSummary func(ctx context.Context, username, summary, strategy string) error
-	ListRecent     func(ctx context.Context, username string, limit int) ([]store.Message, error)
-	Compress       func(ctx context.Context, existingSummary string, history []llm.Message) contextengine.Result
+	PrefetchMemory      func(ctx context.Context, username, prompt string) (string, error)
+	GetSummary          func(ctx context.Context, username string) (store.ContextSummary, error)
+	PersistSummary      func(ctx context.Context, username, summary, strategy string) error
+	ListRecent          func(ctx context.Context, username string, limit int) ([]store.Message, error)
+	ListRecentBySession func(ctx context.Context, sessionID int64, limit int) ([]store.Message, error)
+	Compress            func(ctx context.Context, existingSummary string, history []llm.Message) contextengine.Result
 }
 
 // Builder assembles prompt plans and optionally caches them.
@@ -74,9 +76,17 @@ func (b *Builder) Build(ctx context.Context, input BuildInput) (BuildResult, err
 	if err != nil {
 		return BuildResult{}, err
 	}
-	recentMessages, err := b.deps.ListRecent(ctx, input.Username, input.HistoryWindow)
-	if err != nil {
-		return BuildResult{}, err
+	var recentMessages []store.Message
+	if input.SessionID > 0 && b.deps.ListRecentBySession != nil {
+		recentMessages, err = b.deps.ListRecentBySession(ctx, input.SessionID, input.HistoryWindow)
+		if err != nil {
+			return BuildResult{}, err
+		}
+	} else {
+		recentMessages, err = b.deps.ListRecent(ctx, input.Username, input.HistoryWindow)
+		if err != nil {
+			return BuildResult{}, err
+		}
 	}
 	history := recentStoreMessagesToHistory(recentMessages)
 	compression := b.deps.Compress(ctx, storedSummary.Summary, history)
@@ -164,6 +174,8 @@ func (b *Builder) ClearCache() {
 func buildCacheKey(input BuildInput, memoryContext, summary string, history []llm.Message) string {
 	var builder strings.Builder
 	builder.WriteString(input.Username)
+	builder.WriteString("\n")
+	builder.WriteString(fmt.Sprintf("%d", input.SessionID))
 	builder.WriteString("\n")
 	builder.WriteString(input.Model)
 	builder.WriteString("\n")

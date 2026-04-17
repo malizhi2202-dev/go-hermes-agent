@@ -147,6 +147,12 @@ sequenceDiagram
     CLI-->>User: 输出结果
 ```
 
+说明：
+
+- 当前 Go 版交互控制台已经承载了大量 Python CLI 风格的 slash commands，不再只是单轮聊天壳。
+- 默认普通聊天现在已经是控制台内持续会话：首次输入创建 session，后续输入继续追加到同一个 session。
+- `/resume` 现在能把控制台切到指定 session，并让后续普通输入基于该 session 的最近消息继续续聊。
+
 ### 4.3 多 Agent 执行时序
 
 ```mermaid
@@ -234,7 +240,7 @@ Go 版不是逐文件翻译，而是按能力分层迁移：
 当前最推荐的 Go 使用方式是：
 
 1. 单机部署
-2. `hermesctl chat` 作为基础交互入口
+2. `hermesctl chat` 作为统一交互入口和运维控制台
 3. `hermesd` 提供 API 和 webhook 扩展入口
 4. 通过插件格式或后续平台适配做外部接入
 

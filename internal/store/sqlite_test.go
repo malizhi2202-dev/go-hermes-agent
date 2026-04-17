@@ -155,6 +155,115 @@ func TestListSessionsAndMessagesPagination(t *testing.T) {
 	}
 }
 
+func TestDeleteSessionRemovesSessionAndMessages(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	sessionID, err := st.CreateSession(ctx, "alice", "model", "p", "r")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := st.AddMessage(ctx, sessionID, "user", "alpha"); err != nil {
+		t.Fatalf("add user message: %v", err)
+	}
+	if err := st.AddMessage(ctx, sessionID, "assistant", "beta"); err != nil {
+		t.Fatalf("add assistant message: %v", err)
+	}
+	if err := st.DeleteSession(ctx, sessionID); err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+	sessions, err := st.ListSessionsPage(ctx, "alice", 10, 0)
+	if err != nil {
+		t.Fatalf("list sessions after delete: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("expected no sessions after delete, got %#v", sessions)
+	}
+	messages, err := st.GetMessagesPage(ctx, sessionID, 10, 0)
+	if err != nil {
+		t.Fatalf("get messages after delete: %v", err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("expected no messages after delete, got %#v", messages)
+	}
+}
+
+func TestDeleteLastTurnKeepsSessionAndRefreshesSnapshot(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	sessionID, err := st.CreateSession(ctx, "alice", "test-model", "seed-2", "reply-2")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	_ = st.AddMessage(ctx, sessionID, "user", "seed-1")
+	_ = st.AddMessage(ctx, sessionID, "assistant", "reply-1")
+	_ = st.AddMessage(ctx, sessionID, "user", "seed-2")
+	_ = st.AddMessage(ctx, sessionID, "assistant", "reply-2")
+
+	if err := st.DeleteLastTurn(ctx, sessionID); err != nil {
+		t.Fatalf("delete last turn: %v", err)
+	}
+	messages, err := st.GetMessagesPage(ctx, sessionID, 10, 0)
+	if err != nil {
+		t.Fatalf("get messages: %v", err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 remaining messages, got %#v", messages)
+	}
+	if messages[0].Content != "seed-1" || messages[1].Content != "reply-1" {
+		t.Fatalf("unexpected remaining messages: %#v", messages)
+	}
+	session, err := st.GetSession(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if session.Prompt != "seed-1" || session.Response != "reply-1" {
+		t.Fatalf("unexpected refreshed session snapshot: %#v", session)
+	}
+}
+
+func TestDeleteLastTurnClearsSnapshotWhenSessionBecomesEmpty(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	sessionID, err := st.CreateSession(ctx, "alice", "test-model", "seed-1", "reply-1")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	_ = st.AddMessage(ctx, sessionID, "user", "seed-1")
+	_ = st.AddMessage(ctx, sessionID, "assistant", "reply-1")
+
+	if err := st.DeleteLastTurn(ctx, sessionID); err != nil {
+		t.Fatalf("delete last turn: %v", err)
+	}
+	messages, err := st.GetMessagesPage(ctx, sessionID, 10, 0)
+	if err != nil {
+		t.Fatalf("get messages: %v", err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("expected empty session after deleting only turn, got %#v", messages)
+	}
+	session, err := st.GetSession(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if session.Prompt != "" || session.Response != "" {
+		t.Fatalf("expected cleared session snapshot, got %#v", session)
+	}
+}
+
 func TestListAuditFilteredSupportsTimeAndOffset(t *testing.T) {
 	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
@@ -203,6 +312,54 @@ func TestListAuditFilteredSupportsWildcardAction(t *testing.T) {
 	}
 	if len(records) != 2 {
 		t.Fatalf("expected 2 wildcard audit records, got %d", len(records))
+	}
+}
+
+func TestBuildUserInsights(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	chatSession, err := st.CreateSession(ctx, "alice", "model", "hello", "world")
+	if err != nil {
+		t.Fatalf("create chat session: %v", err)
+	}
+	if err := st.AddMessage(ctx, chatSession, "user", "hello"); err != nil {
+		t.Fatalf("add user message: %v", err)
+	}
+	if err := st.AddMessage(ctx, chatSession, "assistant", "world"); err != nil {
+		t.Fatalf("add assistant message: %v", err)
+	}
+	_, err = st.CreateSessionWithOptions(ctx, "alice", "model", "objective", "summary", CreateSessionOptions{
+		Kind: "multiagent_parent",
+	})
+	if err != nil {
+		t.Fatalf("create multiagent parent: %v", err)
+	}
+	_, err = st.CreateSessionWithOptions(ctx, "alice", "model", "task", "done", CreateSessionOptions{
+		Kind:            "multiagent_child",
+		ParentSessionID: 2,
+	})
+	if err != nil {
+		t.Fatalf("create multiagent child: %v", err)
+	}
+	_ = st.WriteAudit(ctx, "alice", "chat", "session recorded")
+	_ = st.WriteAudit(ctx, "alice", "system_exec_attempt", "command=echo")
+
+	insights, err := st.BuildUserInsights(ctx, "alice", time.Now().UTC().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("build user insights: %v", err)
+	}
+	if insights.SessionsTotal != 3 || insights.ChatSessions != 1 || insights.MultiAgentParent != 1 || insights.MultiAgentChild != 1 {
+		t.Fatalf("unexpected session aggregates: %#v", insights)
+	}
+	if insights.MessagesTotal != 2 {
+		t.Fatalf("unexpected message count: %#v", insights)
+	}
+	if insights.AuditRecordsTotal != 2 || len(insights.AuditActions) != 2 {
+		t.Fatalf("unexpected audit aggregates: %#v", insights)
 	}
 }
 

@@ -205,6 +205,20 @@ type AuditActionSummary struct {
 	Total  int    `json:"total"`
 }
 
+// UserInsights summarizes recent user activity for CLI observability.
+type UserInsights struct {
+	Username               string               `json:"username"`
+	Since                  time.Time            `json:"since"`
+	SessionsTotal          int                  `json:"sessions_total"`
+	ChatSessions           int                  `json:"chat_sessions"`
+	MultiAgentParent       int                  `json:"multiagent_parent_sessions"`
+	MultiAgentChild        int                  `json:"multiagent_child_sessions"`
+	MessagesTotal          int                  `json:"messages_total"`
+	AuditRecordsTotal      int                  `json:"audit_records_total"`
+	AuditActions           []AuditActionSummary `json:"audit_actions"`
+	LatestSessionCreatedAt string               `json:"latest_session_created_at,omitempty"`
+}
+
 // Open opens or creates the SQLite database and applies the required schema.
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -704,6 +718,61 @@ WHERE 1=1`
 	return summaries, rows.Err()
 }
 
+// BuildUserInsights returns lightweight recent activity aggregates for one user.
+func (s *Store) BuildUserInsights(ctx context.Context, username string, since time.Time) (UserInsights, error) {
+	insights := UserInsights{
+		Username: username,
+		Since:    since.UTC(),
+	}
+	sinceRFC3339 := since.UTC().Format(time.RFC3339)
+	row := s.db.QueryRowContext(ctx, `
+SELECT
+  COUNT(*) AS sessions_total,
+  SUM(CASE WHEN kind = 'chat' THEN 1 ELSE 0 END) AS chat_sessions,
+  SUM(CASE WHEN kind = 'multiagent_parent' THEN 1 ELSE 0 END) AS multiagent_parent_sessions,
+  SUM(CASE WHEN kind = 'multiagent_child' THEN 1 ELSE 0 END) AS multiagent_child_sessions,
+  COALESCE(MAX(created_at), '')
+FROM sessions
+WHERE username = ?
+  AND created_at >= ?`, username, sinceRFC3339)
+	if err := row.Scan(
+		&insights.SessionsTotal,
+		&insights.ChatSessions,
+		&insights.MultiAgentParent,
+		&insights.MultiAgentChild,
+		&insights.LatestSessionCreatedAt,
+	); err != nil {
+		return UserInsights{}, err
+	}
+	msgRow := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM messages m
+JOIN sessions s ON s.id = m.session_id
+WHERE s.username = ?
+  AND m.created_at >= ?`, username, sinceRFC3339)
+	if err := msgRow.Scan(&insights.MessagesTotal); err != nil {
+		return UserInsights{}, err
+	}
+	auditRow := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM audit_log
+WHERE username = ?
+  AND created_at >= ?`, username, sinceRFC3339)
+	if err := auditRow.Scan(&insights.AuditRecordsTotal); err != nil {
+		return UserInsights{}, err
+	}
+	actions, err := s.SummarizeAuditActions(ctx, AuditFilters{
+		Username: username,
+		FromTime: since,
+		Limit:    10,
+	})
+	if err != nil {
+		return UserInsights{}, err
+	}
+	insights.AuditActions = actions
+	return insights, nil
+}
+
 // CreateSessionOptions controls extra metadata recorded for a session.
 type CreateSessionOptions struct {
 	Kind            string
@@ -810,6 +879,102 @@ UPDATE sessions
 SET response = ?
 WHERE id = ?`, response, sessionID)
 	return err
+}
+
+// DeleteSession removes one session and its transcript rows.
+func (s *Store) DeleteSession(ctx context.Context, sessionID int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM messages
+WHERE session_id = ?`, sessionID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM sessions
+WHERE id = ?`, sessionID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// DeleteLastTurn removes the most recent user/assistant turn pair from a session
+// and refreshes the session snapshot fields to match the new tail state.
+func (s *Store) DeleteLastTurn(ctx context.Context, sessionID int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+SELECT id, role
+FROM messages
+WHERE session_id = ?
+ORDER BY id DESC
+LIMIT 2`, sessionID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var ids []int64
+	var roles []string
+	for rows.Next() {
+		var id int64
+		var role string
+		if err := rows.Scan(&id, &role); err != nil {
+			return err
+		}
+		ids = append(ids, id)
+		roles = append(roles, role)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(ids) < 2 {
+		return fmt.Errorf("session %d does not have a full turn to delete", sessionID)
+	}
+	if roles[0] != "assistant" || roles[1] != "user" {
+		return fmt.Errorf("session %d last turn is not a user/assistant pair", sessionID)
+	}
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM messages
+WHERE id IN (?, ?)`, ids[0], ids[1]); err != nil {
+		return err
+	}
+
+	row := tx.QueryRowContext(ctx, `
+SELECT
+  COALESCE((
+    SELECT content
+    FROM messages
+    WHERE session_id = ? AND role = 'user'
+    ORDER BY id DESC
+    LIMIT 1
+  ), ''),
+  COALESCE((
+    SELECT content
+    FROM messages
+    WHERE session_id = ? AND role = 'assistant'
+    ORDER BY id DESC
+    LIMIT 1
+  ), '')`, sessionID, sessionID)
+	var prompt string
+	var response string
+	if err := row.Scan(&prompt, &response); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE sessions
+SET prompt = ?, response = ?
+WHERE id = ?`, prompt, response, sessionID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // InsertMultiAgentTrace inserts one structured child-agent trajectory step.

@@ -48,6 +48,48 @@ Go 版不是 Python 全量平台版，而是：
 - 让 `hermesctl` 覆盖更多现在 Web/API 才能做到的能力
 - 增加会话查看、审计查询、扩展管理、模型管理、多 Agent 运行/恢复等命令
 
+当前切片状态：
+
+- 已完成第一批交互控制台迁移：
+  - `/tool-exec`
+  - `/execution-audit`
+  - `/execution-profile-audit`
+  - `/multiagent-resume`
+  - `/trajectory-show`
+- 已完成第二批会话工作流迁移：
+  - `/new`
+  - `/clear`
+  - `/status`
+  - `/usage`
+  - `/resume`
+  - `/retry`
+  - `/undo`
+- 已完成第三批轻量观测迁移：
+  - `/insights [days]`
+- 已完成第四批 prompt/model 控制台迁移：
+  - `/prompt-inspect`
+  - `/prompt-cache-stats`
+  - `/prompt-cache-clear`
+  - `/prompt-config`
+  - `/model-metadata`
+- 已完成第五批 model/auxiliary 控制台迁移：
+  - `/discover-models`
+  - `/auxiliary-info`
+  - `/auxiliary-chat`
+  - `/auxiliary-switch`
+- 已完成第六批 extension/multiagent observability 控制台迁移：
+  - `/extension-hooks`
+  - `/extension-refresh`
+  - `/extension-state`
+  - `/extension-validate`
+  - `/multiagent-traces`
+  - `/multiagent-summary`
+  - `/multiagent-verifiers`
+  - `/multiagent-failures`
+  - `/multiagent-hotspots`
+- 这些能力不是新造轮子，而是把 `cmd/hermesctl` 已有顶层子命令和 `internal/app` 现有能力接回 `hermesctl chat` 交互控制台。
+- 这一阶段的目标是先把 Go 版补成“可工作的统一控制台”，再逐步追平 Python 版的富交互体验。
+
 为什么迁移：
 
 - 轻量版最适合 CLI first
@@ -58,6 +100,47 @@ Go 落点：
 - `cmd/hermesctl`
 - `internal/app`
 - `internal/api` 作为复用边界
+
+### 3.1.1 Python CLI -> Go CLI 控制台迁移分层
+
+优先迁移到 `hermesctl chat` 的能力：
+
+| Python 能力 | Go 落点 | 当前状态 | 说明 |
+|---|---|---|---|
+| `/history` `/search` `/audit` | `cmd/hermesctl` + `internal/store` | 已有 | 已在交互控制台 |
+| `/new` `/clear` `/status` `/usage` `/insights` | `cmd/hermesctl` + `internal/store` | 已迁入控制台 | 当前先做 console 本地工作流状态和轻量观测面 |
+| `/resume` | `cmd/hermesctl` + `internal/store` + `internal/app` + `internal/prompting` | 已迁入控制台 | 已支持第一版 session-scoped 续聊：恢复后普通输入会继续写入该 session |
+| `/retry` `/undo` | `cmd/hermesctl` + `internal/store` | 已迁入控制台 | 基于最近一轮 console 跟踪的受管 session 删除与重跑 |
+| `/prompt-inspect` `/prompt-cache-stats` `/prompt-cache-clear` `/prompt-config` | `cmd/hermesctl` + `internal/app` + `internal/prompting` | 已迁入控制台 | 复用已有 prompt 观测与缓存能力 |
+| `/model-metadata` | `cmd/hermesctl` + `internal/app` + `internal/models` | 已迁入控制台 | 复用已有模型元数据观测 |
+| `/discover-models` `/auxiliary-info` `/auxiliary-chat` `/auxiliary-switch` | `cmd/hermesctl` + `internal/app` + `internal/models` + `internal/llm` | 已迁入控制台 | 复用已有本地模型发现和 auxiliary 路由能力 |
+| `/extension-hooks` `/extension-refresh` `/extension-state` `/extension-validate` | `cmd/hermesctl` + `internal/extensions` + `internal/store` | 已迁入控制台 | 复用已有扩展治理和 hook 审计能力 |
+| `/multiagent-traces` `/multiagent-summary` `/multiagent-verifiers` `/multiagent-failures` `/multiagent-hotspots` | `cmd/hermesctl` + `internal/store` + `internal/multiagent` | 已迁入控制台 | 复用已有 traces 聚合、失败视图和热点分析能力 |
+| `/tools` `/extensions` | `cmd/hermesctl` + `internal/tools` + `internal/extensions` | 已有 | 已在交互控制台 |
+| `/tool-exec` | `cmd/hermesctl` + `internal/tools` | 已迁入控制台 | 复用顶层 `tool-exec` |
+| `/multiagent-plan` `/run` `/replay` `/resume` | `cmd/hermesctl` + `internal/app` + `internal/multiagent` | 部分完成 | `resume` 已迁入控制台 |
+| `/trajectories` `/trajectory-summary` `/trajectory-show` | `cmd/hermesctl` + `internal/trajectory` | 部分完成 | `show` 已迁入控制台 |
+| `/execution-audit` `/execution-profile-audit` | `cmd/hermesctl` + `internal/store` + `internal/execution` | 已迁入控制台 | 方便本机执行审计排障 |
+
+第二阶段迁移：
+
+| Python 能力 | Go 模块建议 | 迁移原则 |
+|---|---|---|
+| 默认持续会话 / 更像 Python 的会话 pinning | `cmd/hermesctl` + `internal/app` + `internal/prompting` + `internal/store` | 已完成第一版 | 控制台普通聊天已默认持续写入当前 session，`/retry` `/undo` 也升级为按最近一轮 turn 回滚 |
+| 更细粒度 token/cost analytics | `cmd/hermesctl` + `internal/llm` + `internal/store` | 需要先定义 Go 版稳定计量口径，再补 Python 风格 insights 深度分析 |
+| `/reasoning` `/fast` | `internal/models` + `internal/llm` | 用显式配置字段替代 Python 动态切换 |
+| `/skills` | `internal/extensions` | 先做 manifest/tap/install/list，不先迁移全部生态 |
+| `/reload-mcp` `/mcp` | `internal/extensions` | 先复用现有 MCP 注册与发现能力 |
+| `/browser` | `internal/tools` + `internal/execution` | 必须走 allowlist/profile，不开放任意浏览器自动化 |
+| `/voice` `/image` `/paste` | 单独模块 | 明确依赖与平台边界后再补 |
+| `/rollback` `/snapshot` | `internal/execution` + `internal/store` | 需要先定义审计和恢复语义 |
+
+第三阶段再考虑：
+
+- 自动补全 / picker / TUI 状态栏
+- 皮肤 / 主题
+- 插件动态 CLI 注册
+- 更接近 Python CLI 的 prompt_toolkit 富交互体验
 
 ### 3.2 Prompt Builder / Prompt Caching
 
