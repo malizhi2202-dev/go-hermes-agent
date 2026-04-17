@@ -140,7 +140,7 @@ func TestRunMultiAgentPlanUsesNativeToolCallingWhenAvailable(t *testing.T) {
 	cfg.CurrentModelProfile = ""
 	cfg.LLM.BaseURL = server.URL
 	cfg.LLM.Model = "test-model"
-	cfg.LLM.APIKeyEnv = ""
+	cfg.LLM.APIKey = ""
 	application, err := New(cfg)
 	if err != nil {
 		t.Fatalf("init app: %v", err)
@@ -287,7 +287,7 @@ func TestRunMultiAgentPlanCanUseExecProfileTool(t *testing.T) {
 	cfg.CurrentModelProfile = ""
 	cfg.LLM.BaseURL = server.URL
 	cfg.LLM.Model = "test-model"
-	cfg.LLM.APIKeyEnv = ""
+	cfg.LLM.APIKey = ""
 	cfg.Execution.Enabled = true
 	cfg.Execution.AllowedCommands = []string{"echo", "date"}
 	application, err := New(cfg)

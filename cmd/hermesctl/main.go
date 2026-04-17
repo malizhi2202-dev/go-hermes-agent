@@ -249,7 +249,7 @@ func runSwitchModel(args []string) {
 	modelID := fs.String("model", "", "direct model id")
 	baseURL := fs.String("base-url", "", "direct model base url")
 	provider := fs.String("provider", "openai-compatible", "direct model provider")
-	apiKeyEnv := fs.String("api-key-env", "", "direct model API key env")
+	apiKey := fs.String("api-key", "", "direct model API key")
 	local := fs.Bool("local", false, "mark direct model as local")
 	_ = fs.Parse(args)
 
@@ -269,7 +269,7 @@ func runSwitchModel(args []string) {
 		llmCfg.Model = strings.TrimSpace(*modelID)
 		llmCfg.BaseURL = strings.TrimSpace(*baseURL)
 		llmCfg.Provider = strings.TrimSpace(*provider)
-		llmCfg.APIKeyEnv = strings.TrimSpace(*apiKeyEnv)
+		llmCfg.APIKey = strings.TrimSpace(*apiKey)
 		llmCfg.Local = *local
 		llmCfg.DisplayName = *modelID
 		if err := cfg.UpsertModelProfile(profileName, llmCfg); err != nil {

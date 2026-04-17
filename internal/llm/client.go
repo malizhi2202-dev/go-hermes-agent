@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -146,12 +145,9 @@ func (c *Client) ChatWithMessages(ctx context.Context, systemBlocks []string, hi
 // ChatCompletion sends a normalized chat completion request and optionally
 // includes native tool definitions for OpenAI-compatible tool-calling.
 func (c *Client) ChatCompletion(ctx context.Context, systemBlocks []string, history []message, prompt string, toolDefs []ToolDefinition) (ChatCompletion, error) {
-	apiKey := ""
-	if strings.TrimSpace(c.cfg.APIKeyEnv) != "" {
-		apiKey = strings.TrimSpace(os.Getenv(c.cfg.APIKeyEnv))
-		if apiKey == "" {
-			return ChatCompletion{}, fmt.Errorf("missing API key env %q", c.cfg.APIKeyEnv)
-		}
+	apiKey := strings.TrimSpace(c.cfg.APIKey)
+	if apiKey == "" {
+		return ChatCompletion{}, fmt.Errorf("missing API key env %q", c.cfg.APIKey)
 	}
 	messages := []message{{Role: "system", Content: "You are a secure, concise assistant."}}
 	for _, block := range systemBlocks {

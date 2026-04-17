@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -754,7 +753,7 @@ func (a *App) tryRunMultiAgentLLMTaskWithState(ctx context.Context, username str
 	if strings.TrimSpace(llmCfg.BaseURL) == "" || strings.TrimSpace(llmCfg.Model) == "" {
 		return "", "", nil, nil, fmt.Errorf("llm is not configured")
 	}
-	if strings.TrimSpace(llmCfg.APIKeyEnv) != "" && strings.TrimSpace(os.Getenv(llmCfg.APIKeyEnv)) == "" {
+	if strings.TrimSpace(llmCfg.APIKey) == "" {
 		return "", "", nil, nil, fmt.Errorf("missing llm api key")
 	}
 	preferredRuntime := strings.TrimSpace(seed.Runtime)

@@ -421,7 +421,7 @@ func (s *Server) handleModelSwitch(w http.ResponseWriter, r *http.Request) {
 		Model       string `json:"model"`
 		BaseURL     string `json:"base_url"`
 		Provider    string `json:"provider"`
-		APIKeyEnv   string `json:"api_key_env"`
+		APIKey   string `json:"api_key"`
 		DisplayName string `json:"display_name"`
 		Local       bool   `json:"local"`
 	}
@@ -442,7 +442,7 @@ func (s *Server) handleModelSwitch(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(req.Provider) != "" {
 			llmCfg.Provider = strings.TrimSpace(req.Provider)
 		}
-		llmCfg.APIKeyEnv = strings.TrimSpace(req.APIKeyEnv)
+		llmCfg.APIKey = strings.TrimSpace(req.APIKey)
 		if strings.TrimSpace(req.DisplayName) != "" {
 			llmCfg.DisplayName = strings.TrimSpace(req.DisplayName)
 		}

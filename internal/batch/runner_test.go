@@ -27,7 +27,7 @@ func TestLoadJSONLAndRun(t *testing.T) {
 	cfg := config.Default()
 	cfg.DataDir = filepath.Join(t.TempDir(), "data")
 	cfg.LLM.BaseURL = "http://127.0.0.1:1"
-	cfg.LLM.APIKeyEnv = ""
+	cfg.LLM.APIKey = ""
 	application, err := apppkg.New(cfg)
 	if err != nil {
 		t.Fatalf("init app: %v", err)

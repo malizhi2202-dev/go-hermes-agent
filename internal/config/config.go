@@ -38,7 +38,7 @@ type LLMConfig struct {
 	Provider       string `yaml:"provider"`
 	Model          string `yaml:"model"`
 	BaseURL        string `yaml:"base_url"`
-	APIKeyEnv      string `yaml:"api_key_env"`
+	APIKey         string `yaml:"api_key"`
 	TimeoutSeconds int    `yaml:"timeout_seconds"`
 	DisplayName    string `yaml:"display_name"`
 	Local          bool   `yaml:"local"`
@@ -197,7 +197,7 @@ func Default() Config {
 			Provider:       "openai-compatible",
 			Model:          "gpt-4.1-mini",
 			BaseURL:        "https://api.openai.com/v1",
-			APIKeyEnv:      "OPENAI_API_KEY",
+			APIKey:      "OPENAI_API_KEY",
 			TimeoutSeconds: 60,
 			DisplayName:    "OpenAI GPT-4.1 Mini",
 		},
@@ -207,7 +207,7 @@ func Default() Config {
 				Provider:       "openai-compatible",
 				Model:          "gpt-4.1-mini",
 				BaseURL:        "https://api.openai.com/v1",
-				APIKeyEnv:      "OPENAI_API_KEY",
+				APIKey:      "OPENAI_API_KEY",
 				TimeoutSeconds: 60,
 				DisplayName:    "OpenAI GPT-4.1 Mini",
 			},
@@ -215,7 +215,7 @@ func Default() Config {
 				Provider:       "openai-compatible",
 				Model:          "anthropic/claude-sonnet-4.6",
 				BaseURL:        "https://openrouter.ai/api/v1",
-				APIKeyEnv:      "OPENROUTER_API_KEY",
+				APIKey:      "OPENROUTER_API_KEY",
 				TimeoutSeconds: 60,
 				DisplayName:    "OpenRouter Claude Sonnet 4.6",
 			},
@@ -223,7 +223,7 @@ func Default() Config {
 				Provider:       "openai-compatible",
 				Model:          "qwen3:14b",
 				BaseURL:        "http://127.0.0.1:11434/v1",
-				APIKeyEnv:      "",
+				APIKey:      "",
 				TimeoutSeconds: 60,
 				DisplayName:    "Ollama Qwen3 14B",
 				Local:          true,
@@ -232,7 +232,7 @@ func Default() Config {
 				Provider:       "openai-compatible",
 				Model:          "local-model",
 				BaseURL:        "http://127.0.0.1:1234/v1",
-				APIKeyEnv:      "",
+				APIKey:      "",
 				TimeoutSeconds: 60,
 				DisplayName:    "LM Studio Local Model",
 				Local:          true,
@@ -565,7 +565,7 @@ func mergeLLMConfig(base, override LLMConfig) LLMConfig {
 	if override.BaseURL != "" {
 		result.BaseURL = override.BaseURL
 	}
-	result.APIKeyEnv = override.APIKeyEnv
+	result.APIKey = override.APIKey
 	if override.TimeoutSeconds > 0 {
 		result.TimeoutSeconds = override.TimeoutSeconds
 	}

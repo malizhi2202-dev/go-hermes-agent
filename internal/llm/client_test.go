@@ -47,7 +47,7 @@ func TestChatCompletionParsesNativeToolCalls(t *testing.T) {
 	cfg.CurrentModelProfile = ""
 	cfg.LLM.BaseURL = server.URL
 	cfg.LLM.Model = "test-model"
-	cfg.LLM.APIKeyEnv = ""
+	cfg.LLM.APIKey = ""
 	client := New(cfg)
 
 	completion, err := client.ChatCompletion(context.Background(), []string{"system"}, nil, "find alpha", []ToolDefinition{
