@@ -111,7 +111,11 @@ type ChatCompletion struct {
 
 // New builds a client from the active application config.
 func New(cfg config.Config) *Client {
-	llmCfg := cfg.ResolvedLLM()
+	return NewFromLLMConfig(cfg.ResolvedLLM())
+}
+
+// NewFromLLMConfig builds a client from one explicit resolved LLM config.
+func NewFromLLMConfig(llmCfg config.LLMConfig) *Client {
 	return &Client{
 		cfg: llmCfg,
 		client: &http.Client{

@@ -19,3 +19,10 @@
 - 对上层暴露统一 `Chat / ChatWithContext / ChatWithMessages / ChatCompletion`
 - tool-calling 优先使用标准协议，不依赖提示词约定
 - 仍保留向后兼容，方便 child runtime 在不支持原生 tool-calling 的模型上回退
+
+
+## 新增轻量能力
+
+- `auxiliary.go` 提供 side-task 模型路由
+- 可为 `summary / compression / general` 选择不同 profile
+- 继续保持 OpenAI-compatible client 为唯一底层调用边界

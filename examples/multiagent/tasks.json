@@ -1,0 +1,9 @@
+[
+  {
+    "id": "gateway-audit",
+    "title": "Inspect gateway status",
+    "goal": "Review the recent gateway related history and summarize risks.",
+    "history_window": 6,
+    "allowed_tools": ["session.search", "session.history"]
+  }
+]

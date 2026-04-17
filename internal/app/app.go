@@ -18,6 +18,7 @@ import (
 	"go-hermes-agent/internal/memory"
 	"go-hermes-agent/internal/models"
 	"go-hermes-agent/internal/multiagent"
+	"go-hermes-agent/internal/prompting"
 	"go-hermes-agent/internal/store"
 	"go-hermes-agent/internal/tools"
 )
@@ -34,6 +35,8 @@ type App struct {
 	Extensions *extensions.Manager
 	Memory     *memory.Manager
 	Compressor *contextengine.Compressor
+	Prompts    *prompting.Builder
+	Auxiliary  *llm.AuxiliaryRouter
 	MultiAgent *multiagent.Orchestrator
 }
 
@@ -53,6 +56,15 @@ type ContextBudget struct {
 	SystemBlocksUsed        int    `json:"system_blocks_used"`
 	PromptChars             int    `json:"prompt_chars"`
 	MaxPromptChars          int    `json:"max_prompt_chars"`
+}
+
+// ChatResult is the structured result of one chat turn.
+type ChatResult struct {
+	SessionID int64                 `json:"session_id"`
+	Model     string                `json:"model"`
+	Prompt    string                `json:"prompt"`
+	Response  string                `json:"response"`
+	Plan      prompting.BuildResult `json:"plan"`
 }
 
 // ResumeBasis describes the exact trace step used to rebuild a resumed child task.
@@ -100,6 +112,10 @@ func New(cfg config.Config) (*App, error) {
 		return nil, err
 	}
 	registry := tools.New()
+	var promptCache *prompting.Cache
+	if cfg.Prompting.CacheEnabled {
+		promptCache = prompting.NewCache(time.Duration(cfg.Prompting.CacheTTLMinutes) * time.Minute)
+	}
 	application := &App{
 		Config:     cfg,
 		Store:      st,
@@ -145,6 +161,28 @@ func New(cfg config.Config) (*App, error) {
 			},
 		),
 	}
+	application.Auxiliary = llm.NewAuxiliaryRouter(func() config.Config {
+		application.mu.RLock()
+		defer application.mu.RUnlock()
+		return application.Config
+	})
+	application.Prompts = prompting.NewBuilder(prompting.Dependencies{
+		PrefetchMemory: func(ctx context.Context, username, prompt string) (string, error) {
+			return application.Memory.Prefetch(ctx, username, prompt)
+		},
+		GetSummary: func(ctx context.Context, username string) (store.ContextSummary, error) {
+			return application.Store.GetContextSummary(ctx, username)
+		},
+		PersistSummary: func(ctx context.Context, username, summary, strategy string) error {
+			return application.Store.UpsertContextSummary(ctx, username, summary, strategy)
+		},
+		ListRecent: func(ctx context.Context, username string, limit int) ([]store.Message, error) {
+			return application.Store.ListRecentMessagesByUsername(ctx, username, limit)
+		},
+		Compress: func(ctx context.Context, existingSummary string, history []llm.Message) contextengine.Result {
+			return application.Compressor.Compress(ctx, existingSummary, history)
+		},
+	}, promptCache)
 	application.Compressor.WithSummarizer(func(ctx context.Context, existingSummary string, history []llm.Message, maxChars int) (string, error) {
 		if application.Config.Context.SummaryStrategy != "llm" {
 			return "", nil
@@ -163,7 +201,7 @@ func New(cfg config.Config) (*App, error) {
 		if len(lines) > 0 {
 			prompt += "\nNew conversation chunk:\n" + strings.Join(lines, "\n")
 		}
-		summary, err := application.LLM.ChatWithContext(ctx, []string{
+		summary, _, err := application.Auxiliary.Chat(ctx, "compression", []string{
 			"You summarize prior conversation context for handoff.",
 			fmt.Sprintf("Return plain text only. Keep under %d characters.", maxChars),
 		}, prompt)
@@ -239,176 +277,146 @@ func (a *App) Close() error {
 
 // Chat runs one authenticated chat turn and records the result as a new session.
 func (a *App) Chat(ctx context.Context, username, prompt string) (string, error) {
+	result, err := a.ChatDetailed(ctx, username, prompt)
+	if err != nil {
+		return "", err
+	}
+	return result.Response, nil
+}
+
+// ChatDetailed runs one authenticated chat turn and returns the session-linked result.
+func (a *App) ChatDetailed(ctx context.Context, username, prompt string) (ChatResult, error) {
 	a.mu.RLock()
 	client := a.LLM
 	model := a.Config.ResolvedLLM().Model
+	builder := a.Prompts
 	mem := a.Memory
-	compressor := a.Compressor
-	historyWindow := a.Config.Context.HistoryWindowMessages
-	maxPromptChars := a.Config.Context.MaxPromptChars
+	input := prompting.BuildInput{
+		Username:           username,
+		Prompt:             prompt,
+		Model:              model,
+		HistoryWindow:      a.Config.Context.HistoryWindowMessages,
+		MaxPromptChars:     a.Config.Context.MaxPromptChars,
+		SummaryStrategy:    a.Config.Context.SummaryStrategy,
+		CompressionEnabled: a.Config.Context.CompressionEnabled,
+	}
 	a.mu.RUnlock()
-	memoryContext, err := mem.Prefetch(ctx, username, prompt)
+	plan, err := builder.Build(ctx, input)
 	if err != nil {
-		return "", err
+		return ChatResult{}, err
 	}
-	systemBlocks := []string(nil)
-	if memoryContext != "" {
-		systemBlocks = append(systemBlocks, memoryContext)
+	if plan.Compression.Compressed {
+		_ = a.Store.WriteAudit(ctx, username, "context_compress_applied", fmt.Sprintf("compressed_messages=%d", plan.Compression.CompressedMessages))
 	}
-	storedSummary, err := a.Store.GetContextSummary(ctx, username)
+	response, err := client.ChatWithMessages(ctx, plan.SystemBlocks, plan.History, prompt)
 	if err != nil {
-		return "", err
-	}
-	if storedSummary.Summary != "" {
-		systemBlocks = append(systemBlocks, storedSummary.Summary)
-	}
-	recentMessages, err := a.Store.ListRecentMessagesByUsername(ctx, username, historyWindow)
-	if err != nil {
-		return "", err
-	}
-	history := make([]llmMessage, 0, len(recentMessages))
-	for _, msg := range recentMessages {
-		history = append(history, llmMessage{Role: msg.Role, Content: msg.Content})
-	}
-	compression := compressor.Compress(ctx, storedSummary.Summary, convertHistory(history))
-	if compression.Compressed && compression.SystemBlock != "" {
-		if storedSummary.Summary == "" {
-			systemBlocks = append(systemBlocks, compression.SystemBlock)
-		} else {
-			systemBlocks[len(systemBlocks)-1] = compression.SystemBlock
-		}
-		history = convertBackHistory(compression.History)
-		if err := a.Store.UpsertContextSummary(ctx, username, compression.PersistedSummary, a.Config.Context.SummaryStrategy); err != nil {
-			return "", err
-		}
-		_ = a.Store.WriteAudit(ctx, username, "context_compress_applied", fmt.Sprintf("compressed_messages=%d", compression.CompressedMessages))
-	}
-	trimHistoryToBudget(systemBlocks, &history, prompt, maxPromptChars)
-	response, err := client.ChatWithMessages(ctx, systemBlocks, convertHistory(history), prompt)
-	if err != nil {
-		return "", err
+		return ChatResult{}, err
 	}
 	sessionID, err := a.Store.CreateSession(ctx, username, model, prompt, response)
 	if err != nil {
-		return "", err
+		return ChatResult{}, err
 	}
 	if err := a.Store.AddMessage(ctx, sessionID, "user", prompt); err != nil {
-		return "", err
+		return ChatResult{}, err
 	}
 	if err := a.Store.AddMessage(ctx, sessionID, "assistant", response); err != nil {
-		return "", err
+		return ChatResult{}, err
 	}
 	if err := mem.SyncTurn(ctx, username, prompt, response); err != nil {
-		return "", err
+		return ChatResult{}, err
 	}
-	_ = a.Store.WriteAudit(ctx, username, "chat", "session recorded")
-	return response, nil
-}
-
-type llmMessage struct {
-	Role    string
-	Content string
-}
-
-func convertHistory(history []llmMessage) []llm.Message {
-	result := make([]llm.Message, 0, len(history))
-	for _, item := range history {
-		result = append(result, llm.NewMessage(item.Role, item.Content))
-	}
-	return result
-}
-
-func convertBackHistory(history []llm.Message) []llmMessage {
-	result := make([]llmMessage, 0, len(history))
-	for _, item := range history {
-		result = append(result, llmMessage{Role: item.Role, Content: item.Content})
-	}
-	return result
-}
-
-func trimHistoryToBudget(systemBlocks []string, history *[]llmMessage, prompt string, maxChars int) {
-	if maxChars <= 0 {
-		return
-	}
-	total := len(prompt) + len("You are a secure, concise assistant.")
-	for _, block := range systemBlocks {
-		total += len(block)
-	}
-	for _, item := range *history {
-		total += len(item.Content)
-	}
-	for total > maxChars && len(*history) > 0 {
-		total -= len((*history)[0].Content)
-		*history = (*history)[1:]
-	}
+	_ = a.Store.WriteAudit(ctx, username, "chat", fmt.Sprintf("session recorded cache_hit=%t", plan.CacheHit))
+	return ChatResult{
+		SessionID: sessionID,
+		Model:     model,
+		Prompt:    prompt,
+		Response:  response,
+		Plan:      plan,
+	}, nil
 }
 
 // EstimateContextBudget reports how much context would be injected for a prompt.
 func (a *App) EstimateContextBudget(ctx context.Context, username, prompt string) (ContextBudget, error) {
-	a.mu.RLock()
-	model := a.Config.ResolvedLLM().Model
-	historyWindow := a.Config.Context.HistoryWindowMessages
-	maxPromptChars := a.Config.Context.MaxPromptChars
-	mem := a.Memory
-	compressor := a.Compressor
-	a.mu.RUnlock()
-	memoryContext, err := mem.Prefetch(ctx, username, prompt)
+	plan, err := a.InspectPrompt(ctx, username, prompt)
 	if err != nil {
 		return ContextBudget{}, err
-	}
-	systemBlockContents := make([]string, 0, 2)
-	promptChars := len(prompt) + len("You are a secure, concise assistant.")
-	if memoryContext != "" {
-		systemBlockContents = append(systemBlockContents, memoryContext)
-		promptChars += len(memoryContext)
-	}
-	storedSummary, err := a.Store.GetContextSummary(ctx, username)
-	if err != nil {
-		return ContextBudget{}, err
-	}
-	if storedSummary.Summary != "" {
-		systemBlockContents = append(systemBlockContents, storedSummary.Summary)
-		promptChars += len(storedSummary.Summary)
-	}
-	recentMessages, err := a.Store.ListRecentMessagesByUsername(ctx, username, historyWindow)
-	if err != nil {
-		return ContextBudget{}, err
-	}
-	history := make([]llmMessage, 0, len(recentMessages))
-	for _, msg := range recentMessages {
-		history = append(history, llmMessage{Role: msg.Role, Content: msg.Content})
-	}
-	compression := compressor.Compress(ctx, storedSummary.Summary, convertHistory(history))
-	if compression.Compressed && compression.SystemBlock != "" {
-		if storedSummary.Summary == "" {
-			systemBlockContents = append(systemBlockContents, compression.SystemBlock)
-			promptChars += len(compression.SystemBlock)
-		} else {
-			promptChars -= len(storedSummary.Summary)
-			systemBlockContents[len(systemBlockContents)-1] = compression.SystemBlock
-			promptChars += len(compression.SystemBlock)
-		}
-		history = convertBackHistory(compression.History)
-	}
-	trimHistoryToBudget(systemBlockContents, &history, prompt, maxPromptChars)
-	for _, item := range history {
-		promptChars += len(item.Content)
 	}
 	return ContextBudget{
-		Model:                   model,
-		HistoryWindowMessages:   historyWindow,
-		HistoryMessagesUsed:     len(history),
+		Model:                   plan.Model,
+		HistoryWindowMessages:   plan.HistoryWindowMessages,
+		HistoryMessagesUsed:     plan.HistoryMessagesUsed,
 		CompressionEnabled:      a.Config.Context.CompressionEnabled,
 		SummaryStrategy:         a.Config.Context.SummaryStrategy,
-		Compressed:              compression.Compressed,
-		CompressedMessages:      compression.CompressedMessages,
-		CompressionSummaryChars: compression.SummaryChars,
-		PersistedSummaryChars:   len(storedSummary.Summary),
-		TailMessagesUsed:        compression.TailMessagesUsed,
-		SystemBlocksUsed:        len(systemBlockContents),
-		PromptChars:             promptChars,
-		MaxPromptChars:          maxPromptChars,
+		Compressed:              plan.Compression.Compressed,
+		CompressedMessages:      plan.Compression.CompressedMessages,
+		CompressionSummaryChars: plan.Compression.SummaryChars,
+		PersistedSummaryChars:   len(plan.PersistedSummary),
+		TailMessagesUsed:        plan.Compression.TailMessagesUsed,
+		SystemBlocksUsed:        plan.SystemBlocksUsed,
+		PromptChars:             plan.PromptChars,
+		MaxPromptChars:          plan.MaxPromptChars,
 	}, nil
+}
+
+// InspectPrompt returns the fully assembled prompt plan used for one chat turn.
+func (a *App) InspectPrompt(ctx context.Context, username, prompt string) (prompting.BuildResult, error) {
+	a.mu.RLock()
+	builder := a.Prompts
+	input := prompting.BuildInput{
+		Username:           username,
+		Prompt:             prompt,
+		Model:              a.Config.ResolvedLLM().Model,
+		HistoryWindow:      a.Config.Context.HistoryWindowMessages,
+		MaxPromptChars:     a.Config.Context.MaxPromptChars,
+		SummaryStrategy:    a.Config.Context.SummaryStrategy,
+		CompressionEnabled: a.Config.Context.CompressionEnabled,
+	}
+	a.mu.RUnlock()
+	return builder.Build(ctx, input)
+}
+
+// PromptCacheStats returns local prompt cache counters.
+func (a *App) PromptCacheStats() prompting.CacheStats {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.Prompts.CacheStats()
+}
+
+// ClearPromptCache removes all local prompt plan cache entries.
+func (a *App) ClearPromptCache() {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	a.Prompts.ClearCache()
+}
+
+// AuxiliaryInfo returns the resolved auxiliary model for one side-task.
+func (a *App) AuxiliaryInfo(task string) (llm.AuxiliaryResolution, error) {
+	a.mu.RLock()
+	router := a.Auxiliary
+	a.mu.RUnlock()
+	return router.Resolve(task)
+}
+
+// AuxiliaryChat runs one lightweight auxiliary request.
+func (a *App) AuxiliaryChat(ctx context.Context, task, prompt string) (string, llm.AuxiliaryResolution, error) {
+	a.mu.RLock()
+	router := a.Auxiliary
+	a.mu.RUnlock()
+	return router.Chat(ctx, task, []string{"You are a lightweight auxiliary assistant for Hermes-Go."}, prompt)
+}
+
+// CurrentModelMetadata returns lightweight provider-aware metadata for the active model.
+func (a *App) CurrentModelMetadata() models.Metadata {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return models.ResolveMetadata(a.Config.ResolvedLLM())
+}
+
+// ListModelMetadata returns lightweight metadata for all configured model profiles.
+func (a *App) ListModelMetadata() map[string]models.Metadata {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return models.ListProfileMetadata(a.Config.ModelProfiles)
 }
 
 // CurrentLLM returns the currently active resolved LLM config.

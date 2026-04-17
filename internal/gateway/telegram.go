@@ -50,6 +50,16 @@ func NewTelegramAdapter(application *app.App) *TelegramAdapter {
 	}
 }
 
+// Name returns the adapter name.
+func (a *TelegramAdapter) Name() string {
+	return "telegram"
+}
+
+// Routes returns the inbound routes exposed by the Telegram adapter.
+func (a *TelegramAdapter) Routes() []Route {
+	return []Route{{Path: "/gateway/telegram/webhook", Handler: a.HandleWebhook}}
+}
+
 // HandleWebhook validates the Telegram secret, deduplicates updates, routes
 // the message into chat or multi-agent execution, and sends the reply.
 func (a *TelegramAdapter) HandleWebhook(w http.ResponseWriter, r *http.Request) {

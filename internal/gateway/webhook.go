@@ -32,6 +32,16 @@ func NewWebhookAdapter(application *app.App) *WebhookAdapter {
 	return &WebhookAdapter{app: application}
 }
 
+// Name returns the adapter name.
+func (a *WebhookAdapter) Name() string {
+	return "webhook"
+}
+
+// Routes returns the inbound routes exposed by the generic webhook adapter.
+func (a *WebhookAdapter) Routes() []Route {
+	return []Route{{Path: "/gateway/webhook", Handler: a.HandleWebhook}}
+}
+
 // HandleWebhook validates the token, decodes the inbound message, and routes
 // the request into either chat or the multi-agent path.
 func (a *WebhookAdapter) HandleWebhook(w http.ResponseWriter, r *http.Request) {

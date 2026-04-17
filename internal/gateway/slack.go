@@ -37,6 +37,19 @@ func NewSlackAdapter(application *app.App) *SlackAdapter {
 	}
 }
 
+// Name returns the adapter name.
+func (a *SlackAdapter) Name() string {
+	return "slack"
+}
+
+// Routes returns the inbound routes exposed by the Slack adapter.
+func (a *SlackAdapter) Routes() []Route {
+	return []Route{
+		{Path: "/gateway/slack/command", Handler: a.HandleCommand},
+		{Path: "/gateway/slack/events", Handler: a.HandleEvents},
+	}
+}
+
 type slackEventEnvelope struct {
 	Type      string `json:"type"`
 	Challenge string `json:"challenge"`

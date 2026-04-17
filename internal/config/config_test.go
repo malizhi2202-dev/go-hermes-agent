@@ -109,3 +109,19 @@ func TestSaveAndLoadPreservesCurrentModelProfile(t *testing.T) {
 		t.Fatalf("unexpected resolved base url: %s", loaded.ResolvedLLM().BaseURL)
 	}
 }
+
+func TestInvalidPromptingConfigFails(t *testing.T) {
+	cfg := Default()
+	cfg.Prompting.CacheTTLMinutes = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for non-positive prompt cache ttl")
+	}
+}
+
+func TestInvalidCronConfigFails(t *testing.T) {
+	cfg := Default()
+	cfg.Cron.TickSeconds = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for non-positive cron tick seconds")
+	}
+}

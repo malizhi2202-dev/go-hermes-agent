@@ -12,10 +12,10 @@
 - 受限版 Tool Registry
 - 受控动态扩展面：plugin / skill script / MCP
 - 受控 execution profile / extension lifecycle hook
-- 基础 Webhook / Telegram Gateway 适配
-- 基础 Webhook / Telegram / Slack Gateway 适配
+- 基础 Webhook / Telegram / Slack / Weixin Gateway 适配
 - OpenAI 兼容 LLM 调用边界
 - 主流模型 / 本地模型 profile 切换
+- 轻量 cron / scheduler
 - HTTP API 服务
 - 安装与卸载脚本
 
@@ -86,6 +86,8 @@
 - `POST /v1/multiagent/resume` 现在会按最后成功/失败 trace step 生成恢复依据，并优先回放 snapshot 中保存的精确 loop history、next iteration、runtime 模式和累计 tool risks，再把成功 tool state 喂回 child loop
 - `webhook / telegram / slack` 现在支持 `/multiagent ...` 命令路由
 - Slack 现在支持 `slash command`、`url_verification`、`event_callback`、事件去重和 `chat.postMessage` 回复
+- Gateway 现在通过统一 `PlatformAdapter` 契约注册平台路由，便于后续个人继续增加平台
+- Weixin 现在支持轻量 public-account 风格的签名握手、文本消息路由和 XML 回复
 - execution 现在支持配置驱动的 `profile -> steps` 受控执行链，可通过 `system.exec_profile` 调用
 - `system.exec_profile` 已可进入 child delegated runtime，并支持 approval / capability token / rollback profile
 - `/v1/audit/execution/profiles` 现在提供 `exec_profile` 专门的记录、action 聚合和 profile 聚合视图
@@ -191,8 +193,39 @@ go build -o bin/hermesctl ./cmd/hermesctl
 ./bin/hermesctl init-admin --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!'
 ./bin/hermesctl login --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!'
 ./bin/hermesctl chat --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!'
+./bin/hermesctl context --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!' --prompt 'summarize latest work'
+./bin/hermesctl sessions --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!'
+./bin/hermesctl history --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!' --messages-limit 10
+./bin/hermesctl search --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!' --q gateway
+./bin/hermesctl audit --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!'
+./bin/hermesctl extensions --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!'
+./bin/hermesctl tools --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!'
+./bin/hermesctl multiagent-plan --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!' --objective 'inspect gateway' --tasks-file ./examples/multiagent/tasks.json
+./bin/hermesctl multiagent-run --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!' --plan-file ./examples/multiagent/plan.json
+./bin/hermesctl multiagent-replay --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!' --child-session-id 12
+./bin/hermesctl batch-run --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!' --dataset-file ./examples/batch/prompts.jsonl --run-name demo
+./bin/hermesctl batch-run --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!' --dataset-file ./examples/batch/prompts.jsonl --run-name demo --resume
+./bin/hermesctl trajectories --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!' --limit 10 --run-name demo
+./bin/hermesctl trajectory-summary --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!' --run-name demo
+./bin/hermesctl cron-add --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!' --name daily-summary --prompt 'summarize the latest project state' --schedule 'every 2h'
+./bin/hermesctl cron-list --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!'
+./bin/hermesctl cron-tick --config ./configs/config.example.yaml --username admin --password 'ChangeMe123!'
 ./bin/hermesd --config ./configs/config.example.yaml
 ```
+
+`hermesctl` 现在不只是登录和对话入口，也覆盖了大部分原 Web/API 运维面：
+
+- prompt 观测：`prompt-inspect` / `prompt-cache-stats` / `prompt-cache-clear` / `prompt-config`
+- 辅助模型：`auxiliary-info` / `auxiliary-chat` / `auxiliary-switch`
+- 模型元数据：`model-metadata`
+- 上下文预算：`context`
+- 会话与历史：`sessions` / `history` / `search`
+- 审计与执行审计：`audit` / `execution-audit` / `execution-profile-audit`
+- 扩展治理：`extensions` / `extension-hooks` / `extension-refresh` / `extension-state` / `extension-validate`
+- 工具治理：`tools` / `tool-exec`
+- 多 Agent 运维：`multiagent-plan` / `multiagent-run` / `multiagent-traces` / `multiagent-summary` / `multiagent-verifiers` / `multiagent-failures` / `multiagent-hotspots` / `multiagent-replay` / `multiagent-resume`
+- 批处理与轨迹：`batch-run` / `trajectories` / `trajectory-summary` / `trajectory-show`
+- 定时任务：`cron-add` / `cron-list` / `cron-show` / `cron-delete` / `cron-tick`
 
 ## 目录说明
 
@@ -210,6 +243,10 @@ go build -o bin/hermesctl ./cmd/hermesctl
 - `internal/llm`：OpenAI 兼容 LLM 边界
 - `internal/llm/README.md`：LLM 调用和原生 tool-calling 说明
 - `internal/memory`：文件记忆与 recalled memory 注入
+- `internal/prompting`：prompt builder / prompt cache 轻量实现
+- `internal/trajectory`：chat 轨迹 JSONL 存储与导出
+- `internal/batch`：轻量批处理运行器
+- `internal/cron`：轻量单机定时任务与调度器
 - `internal/memory/README.md`：记忆系统说明
 - `internal/contextengine`：规则型上下文压缩与后续 LLM compressor 扩展点
 - `internal/contextengine/README.md`：上下文压缩说明
@@ -221,7 +258,7 @@ go build -o bin/hermesctl ./cmd/hermesctl
 - `internal/extensions`：plugin / skill / MCP 扩展发现、注册与受控执行
 - `internal/extensions/README.md`：扩展面说明
 - `internal/gateway`：基础 webhook / telegram gateway 适配
-- 当前也包含 Slack slash command / events 适配
+- 当前也包含 Slack slash command / events 适配，以及 Weixin 文本 webhook 适配
 - `internal/gateway/README.md`：gateway 适配与 `/multiagent` 路由说明
 - `internal/execution`：受控版高风险动态执行边界
 - `internal/execution/README.md`：受控执行说明

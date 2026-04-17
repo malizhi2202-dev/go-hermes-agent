@@ -29,9 +29,6 @@ func New(app *app.App) *Server {
 // Handler returns the top-level HTTP handler with all API and gateway routes registered.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	webhook := gateway.NewWebhookAdapter(s.app)
-	telegram := gateway.NewTelegramAdapter(s.app)
-	slack := gateway.NewSlackAdapter(s.app)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/auth/login", s.handleLogin)
 	mux.Handle("/v1/chat", s.authMiddleware(http.HandlerFunc(s.handleChat)))
@@ -62,10 +59,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/v1/extensions/validate", s.authMiddleware(http.HandlerFunc(s.handleExtensionValidate)))
 	mux.Handle("/v1/tools", s.authMiddleware(http.HandlerFunc(s.handleTools)))
 	mux.Handle("/v1/tools/execute", s.authMiddleware(http.HandlerFunc(s.handleExecuteTool)))
-	mux.HandleFunc("/gateway/webhook", webhook.HandleWebhook)
-	mux.HandleFunc("/gateway/telegram/webhook", telegram.HandleWebhook)
-	mux.HandleFunc("/gateway/slack/command", slack.HandleCommand)
-	mux.HandleFunc("/gateway/slack/events", slack.HandleEvents)
+	gateway.RegisterPlatformRoutes(mux, gateway.BuiltInAdapters(s.app)...)
 	return mux
 }
 

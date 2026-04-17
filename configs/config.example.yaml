@@ -64,6 +64,16 @@ context:
   summary_max_chars: 900
   summary_strategy: "rule"
 
+prompting:
+  cache_enabled: true
+  cache_ttl_minutes: 5
+
+auxiliary:
+  enabled: true
+  profile: ""
+  summary_profile: ""
+  compression_profile: ""
+
 security:
   require_auth: true
   allow_registration: false
@@ -75,6 +85,10 @@ server:
   read_timeout_seconds: 15
   write_timeout_seconds: 60
   idle_timeout_seconds: 60
+
+cron:
+  enabled: false
+  tick_seconds: 60
 
 gateway:
   enabled: true
@@ -89,6 +103,9 @@ gateway:
     enabled: false
     signing_secret_env: "SLACK_SIGNING_SECRET"
     bot_token_env: "SLACK_BOT_TOKEN"
+  weixin:
+    enabled: false
+    token: "change-this-weixin-token"
 
 execution:
   enabled: false

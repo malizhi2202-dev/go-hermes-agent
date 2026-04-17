@@ -323,3 +323,66 @@ func TestRunMultiAgentPlanCanUseExecProfileTool(t *testing.T) {
 		t.Fatalf("expected snapshot and verified tool trace, got %#v", results[0].Trace)
 	}
 }
+
+func TestInspectPromptAndPromptCache(t *testing.T) {
+	cfg := config.Default()
+	cfg.DataDir = filepath.Join(t.TempDir(), "data")
+	application, err := New(cfg)
+	if err != nil {
+		t.Fatalf("init app: %v", err)
+	}
+	defer application.Close()
+
+	if _, err := application.Store.CreateSession(context.Background(), "admin", "seed-model", "seed", "seed response"); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	plan, err := application.InspectPrompt(context.Background(), "admin", "hello")
+	if err != nil {
+		t.Fatalf("inspect prompt: %v", err)
+	}
+	if plan.Model == "" || plan.MaxPromptChars == 0 {
+		t.Fatalf("unexpected prompt plan: %#v", plan)
+	}
+	cached, err := application.InspectPrompt(context.Background(), "admin", "hello")
+	if err != nil {
+		t.Fatalf("inspect cached prompt: %v", err)
+	}
+	if !cached.CacheHit {
+		t.Fatalf("expected cache hit: %#v", cached)
+	}
+	stats := application.PromptCacheStats()
+	if stats.Entries == 0 {
+		t.Fatalf("expected prompt cache entries: %#v", stats)
+	}
+	application.ClearPromptCache()
+	if stats := application.PromptCacheStats(); stats.Entries != 0 {
+		t.Fatalf("expected cleared prompt cache: %#v", stats)
+	}
+}
+
+func TestAuxiliaryInfoAndModelMetadata(t *testing.T) {
+	cfg := config.Default()
+	cfg.DataDir = filepath.Join(t.TempDir(), "data")
+	cfg.Auxiliary.Profile = "openrouter-claude-sonnet"
+	application, err := New(cfg)
+	if err != nil {
+		t.Fatalf("init app: %v", err)
+	}
+	defer application.Close()
+
+	info, err := application.AuxiliaryInfo("summary")
+	if err != nil {
+		t.Fatalf("auxiliary info: %v", err)
+	}
+	if info.Config.Model == "" {
+		t.Fatalf("unexpected auxiliary info: %#v", info)
+	}
+	meta := application.CurrentModelMetadata()
+	if meta.Model == "" || meta.ContextWindow == 0 {
+		t.Fatalf("unexpected metadata: %#v", meta)
+	}
+	all := application.ListModelMetadata()
+	if len(all) == 0 {
+		t.Fatal("expected profile metadata")
+	}
+}

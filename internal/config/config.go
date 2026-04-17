@@ -22,8 +22,11 @@ type Config struct {
 	ModelProfiles       map[string]LLMConfig       `yaml:"model_profiles"`
 	Memory              MemoryConfig               `yaml:"memory"`
 	Context             ContextConfig              `yaml:"context"`
+	Prompting           PromptingConfig            `yaml:"prompting"`
+	Auxiliary           AuxiliaryConfig            `yaml:"auxiliary"`
 	Security            SecurityConfig             `yaml:"security"`
 	Server              ServerConfig               `yaml:"server"`
+	Cron                CronConfig                 `yaml:"cron"`
 	Gateway             GatewayConfig              `yaml:"gateway"`
 	Execution           ExecutionConfig            `yaml:"execution"`
 	Extensions          ExtensionConfig            `yaml:"extensions"`
@@ -69,11 +72,31 @@ type ContextConfig struct {
 	SummaryStrategy           string `yaml:"summary_strategy"`
 }
 
+// PromptingConfig controls local prompt assembly and cache behavior.
+type PromptingConfig struct {
+	CacheEnabled    bool `yaml:"cache_enabled"`
+	CacheTTLMinutes int  `yaml:"cache_ttl_minutes"`
+}
+
+// AuxiliaryConfig controls side-task model routing for summary/compression work.
+type AuxiliaryConfig struct {
+	Enabled            bool   `yaml:"enabled"`
+	Profile            string `yaml:"profile"`
+	SummaryProfile     string `yaml:"summary_profile"`
+	CompressionProfile string `yaml:"compression_profile"`
+}
+
 // ServerConfig controls HTTP server timeouts.
 type ServerConfig struct {
 	ReadTimeoutSeconds  int `yaml:"read_timeout_seconds"`
 	WriteTimeoutSeconds int `yaml:"write_timeout_seconds"`
 	IdleTimeoutSeconds  int `yaml:"idle_timeout_seconds"`
+}
+
+// CronConfig controls the lightweight single-node scheduler.
+type CronConfig struct {
+	Enabled     bool `yaml:"enabled"`
+	TickSeconds int  `yaml:"tick_seconds"`
 }
 
 // GatewayConfig controls inbound gateway adapters.
@@ -83,6 +106,7 @@ type GatewayConfig struct {
 	AllowedPlatforms []string              `yaml:"allowed_platforms"`
 	Telegram         TelegramGatewayConfig `yaml:"telegram"`
 	Slack            SlackGatewayConfig    `yaml:"slack"`
+	Weixin           WeixinGatewayConfig   `yaml:"weixin"`
 }
 
 // TelegramGatewayConfig holds Telegram webhook settings.
@@ -97,6 +121,12 @@ type SlackGatewayConfig struct {
 	Enabled          bool   `yaml:"enabled"`
 	SigningSecretEnv string `yaml:"signing_secret_env"`
 	BotTokenEnv      string `yaml:"bot_token_env"`
+}
+
+// WeixinGatewayConfig holds Weixin public-account style webhook settings.
+type WeixinGatewayConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Token   string `yaml:"token"`
 }
 
 // ExecutionConfig controls the constrained command execution runtime.
@@ -230,10 +260,21 @@ func Default() Config {
 			SummaryMaxChars:           900,
 			SummaryStrategy:           "rule",
 		},
+		Prompting: PromptingConfig{
+			CacheEnabled:    true,
+			CacheTTLMinutes: 5,
+		},
+		Auxiliary: AuxiliaryConfig{
+			Enabled: true,
+		},
 		Server: ServerConfig{
 			ReadTimeoutSeconds:  15,
 			WriteTimeoutSeconds: 60,
 			IdleTimeoutSeconds:  60,
+		},
+		Cron: CronConfig{
+			Enabled:     false,
+			TickSeconds: 60,
 		},
 		Gateway: GatewayConfig{
 			Enabled:          true,
@@ -248,6 +289,10 @@ func Default() Config {
 				Enabled:          false,
 				SigningSecretEnv: "SLACK_SIGNING_SECRET",
 				BotTokenEnv:      "SLACK_BOT_TOKEN",
+			},
+			Weixin: WeixinGatewayConfig{
+				Enabled: false,
+				Token:   "change-this-weixin-token",
 			},
 		},
 		Execution: ExecutionConfig{
@@ -385,6 +430,12 @@ func (c Config) Validate() error {
 	}
 	if c.Context.SummaryStrategy != "rule" && c.Context.SummaryStrategy != "llm" {
 		return fmt.Errorf("context.summary_strategy must be one of: rule, llm")
+	}
+	if c.Prompting.CacheTTLMinutes <= 0 {
+		return fmt.Errorf("prompting.cache_ttl_minutes must be > 0")
+	}
+	if c.Cron.TickSeconds <= 0 {
+		return fmt.Errorf("cron.tick_seconds must be > 0")
 	}
 	if c.Execution.TimeoutSeconds <= 0 {
 		return fmt.Errorf("execution.timeout_seconds must be > 0")

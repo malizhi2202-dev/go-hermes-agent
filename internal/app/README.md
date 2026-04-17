@@ -5,6 +5,7 @@
 当前负责：
 
 - 组装 store / auth / llm / tools / extensions / memory / context / multiagent
+- 组装 prompting / auxiliary / trajectory / batch 这些轻量扩展能力
 - 提供 chat、model switch、memory、multiagent 等统一入口
 - 把 gateway 和 API 共用的业务逻辑收口到一个地方
 
