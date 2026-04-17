@@ -250,3 +250,7 @@ go build -o bin/hermesctl ./cmd/hermesctl
 ## Go 文档导航
 
 - [Go Hermes-Agent 完整总文档](./docs/delivery/go-complete-architecture-and-optimization.md)
+- [总体架构与时序](./docs/architecture/overall-architecture-and-sequences.md)
+- [模块架构与时序](./docs/architecture/module-architecture-and-sequences.md)
+- [Python Agent 知识映射](./docs/architecture/python-agent-knowledge-map.md)
+- [轻量版迁移蓝图](./docs/migration/lightweight-migration-blueprint.md)

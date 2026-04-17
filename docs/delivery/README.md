@@ -23,3 +23,11 @@
    - `../analysis/`
    - `../migration/`
    - `../security/`
+
+## 本轮新增推荐阅读顺序
+
+1. `go-complete-architecture-and-optimization.md/.docx`
+2. `../architecture/overall-architecture-and-sequences.md`
+3. `../architecture/module-architecture-and-sequences.md`
+4. `../architecture/python-agent-knowledge-map.md`
+5. `../migration/lightweight-migration-blueprint.md`
